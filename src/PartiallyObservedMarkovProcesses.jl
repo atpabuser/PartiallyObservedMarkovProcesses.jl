@@ -55,6 +55,12 @@ include("simulate.jl")
 export pfilter, logLik, eff_sample_size, cond_logLik
 include("pfilter.jl")
 
+export wpfilter, resampled
+include("wpfilter.jl")
+
+export mif2, traces
+include("mif2.jl")
+
 export traj_match_objfun
 include("trajmatch.jl")
 

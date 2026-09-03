@@ -54,3 +54,31 @@ melt(x::PfilterdPompObject; id...) =
             cond_logLik=x.cond_logLik
         )
     )
+
+"""
+    melt(x::WpfilterdPompObject; id...)
+
+Convert a `WpfilterdPompObject` to a data frame, with columns for time,
+observables, and latent states, if present, as well as effective sample
+size, conditional log likelihood, and whether resampling occurred.
+"""
+melt(x::WpfilterdPompObject; id...) =
+    hcat(
+        melt(pomp(x);id...),
+        DataFrame(
+            ess=x.eff_sample_size,
+            cond_logLik=x.cond_logLik,
+            resampled=x.resampled
+        )
+    )
+
+"""
+    melt(x::Mif2dPompObject; id...)
+
+Convert a `Mif2dPompObject` to a data frame giving the iterated-filtering
+trace: one row per IF2 iteration (including iteration 0, the starting
+point), with columns for the iteration number, the perturbed-model log
+likelihood, and the parameter estimate.
+"""
+melt(x::Mif2dPompObject; id...) =
+    DataFrame(map(r -> merge(NamedTuple(id),r), traces(x)))

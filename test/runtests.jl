@@ -21,5 +21,7 @@ h2 = s -> crayon"!bold light_yellow"("- "*s)
     include("flow.jl")
     include("trajmatch.jl")
     include("pfilter.jl")
+    include("wpfilter.jl")
+    include("mif2.jl")
     include("speed1.jl")
 end
