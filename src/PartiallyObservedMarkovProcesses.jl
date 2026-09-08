@@ -58,6 +58,9 @@ include("pfilter.jl")
 export wpfilter
 include("wpfilter.jl")
 
+export ParameterTransform
+include("partrans.jl")
+
 export mif2, traces
 include("mif2.jl")
 
