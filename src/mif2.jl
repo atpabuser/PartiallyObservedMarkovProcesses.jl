@@ -26,6 +26,7 @@ struct Mif2dPompObject{
     cooling_type::Symbol
     cooling_fraction_50::W
     trigger::W
+    target::W
     transform::Function
     inverse_transform::Function
     paramcloud::Vector{Q}
@@ -114,6 +115,80 @@ cooling(
     end
 end
 
+## --------------------------------------------------------------- rw_sd
+
+"""
+    ivp(sd; lags = 1)
+
+Marks a random-walk standard deviation, for use as an entry of `rw_sd`
+in [`mif2`](@ref), as applying only immediately before the observation
+times whose 1-based index is in `lags` (an integer, or a vector or
+range of integers), and as zero at every other observation time --
+matching R `pomp`'s `ivp`, generalized to arbitrary lags. `rw_sd_init`
+is equivalent to naming the same parameters with `ivp(sd,lags=1)` in
+`rw_sd`.
+"""
+struct Ivp
+    sd::Float64
+    lags::Union{Int,AbstractVector{<:Integer}}
+end
+
+ivp(sd::Real; lags::Union{Integer,AbstractVector{<:Integer}} = 1) =
+    Ivp(Float64(sd),lags isa Integer ? Int(lags) : lags)
+
+## Resolves one `rw_sd` entry (a nonnegative real, a per-observation-index
+## vector, a function of the observation index, or an `Ivp`) to a
+## `Vector{Float64}` of standard deviations, one per observation time,
+## validating as it goes.
+resolve_rw_sd_entry(v::Real, N::Integer, k::Symbol) = begin
+    (isfinite(v) && v ≥ 0) ||
+        error("`rw_sd.$k` must be finite, nonnegative at every observation time.")
+    fill(Float64(v),N)
+end
+
+resolve_rw_sd_entry(v::AbstractVector{<:Real}, N::Integer, k::Symbol) = begin
+    length(v)==N ||
+        error("`rw_sd.$k` is a vector but does not have length equal to the number "*
+              "of observation times ($N); got length $(length(v)).")
+    out = Float64.(v)
+    all(x -> isfinite(x) && x ≥ 0, out) ||
+        error("`rw_sd.$k` must be finite, nonnegative at every observation time.")
+    out
+end
+
+resolve_rw_sd_entry(f::Function, N::Integer, k::Symbol) = begin
+    out = Float64[f(n) for n ∈ 1:N]
+    all(x -> isfinite(x) && x ≥ 0, out) ||
+        error("`rw_sd.$k` must be finite, nonnegative at every observation time.")
+    out
+end
+
+resolve_rw_sd_entry(v::Ivp, N::Integer, k::Symbol) = begin
+    (isfinite(v.sd) && v.sd ≥ 0) ||
+        error("`rw_sd.$k` must be finite, nonnegative at every observation time.")
+    out = zeros(Float64,N)
+    lags = v.lags isa Integer ? (v.lags:v.lags) : v.lags
+    for n ∈ lags
+        (1 ≤ n ≤ N) ||
+            error("`rw_sd.$k`: an `ivp` lag ($n) falls outside the observation "*
+                  "index range 1:$N.")
+        out[n] = v.sd
+    end
+    out
+end
+
+## Resolves the full `rw_sd`/`rw_sd_init` specification, once N (the
+## number of observation times) is known, to a `Vector` of length N of
+## `NamedTuple`s, each giving every perturbed parameter's random-walk
+## standard deviation at that observation time. `rw_sd_init` is merged
+## in as `ivp(sd,lags=1)` for each of its names.
+resolve_sdschedule(rw_sd::NamedTuple, rw_sd_init::NamedTuple, N::Integer) = begin
+    merged = merge(rw_sd,NamedTuple{keys(rw_sd_init)}(map(ivp,values(rw_sd_init))))
+    ks = keys(merged)
+    resolved = NamedTuple{ks}(map(k -> resolve_rw_sd_entry(getproperty(merged,k),N,k),ks))
+    [NamedTuple{ks}(ntuple(d -> getproperty(resolved,ks[d])[n],length(ks))) for n ∈ 1:N]
+end
+
 ## ------------------------------------------------------------ perturbation
 
 perturb!(
@@ -140,16 +215,16 @@ end
 
 ## ------------------------------------------------------------- point estimate
 
+## `w` holds linear (not log) nonnegative weights.
 weighted_mean(
     est::AbstractVector{E},
     w::AbstractVector{W},
 ) where {E<:NamedTuple,W<:AbstractFloat} = begin
     ks = keys(est[1])
-    wmax::W = maximum(w)
     tot::W = 0
     acc = zeros(W,length(ks))
     for i ∈ eachindex(est)
-        u::W = exp(w[i]-wmax)
+        u::W = w[i]
         tot += u
         for d ∈ eachindex(ks)
             @inbounds acc[d] += u*getproperty(est[i],ks[d])
@@ -202,6 +277,53 @@ mif_chunks(Np::Integer, Q::Type) = begin
     (chunks,thetabufs)
 end
 
+## ---------------------------------------------------------- transform
+
+## Normalizes the three accepted forms of `mif2`'s `transform` argument
+## to a plain `(to,from)` pair of `Function`s. For the two declarative
+## forms, the inverse is derived, so a non-default `inverse_transform`
+## is rejected.
+normalize_transform(transform::Function, inverse_transform::Union{Function,Nothing}) =
+    (transform,inverse_transform === nothing ? identity : inverse_transform)
+
+normalize_transform(transform::NamedTuple, inverse_transform::Union{Function,Nothing}) = begin
+    inverse_transform === nothing ||
+        error("`inverse_transform` must not be supplied when `transform` is a "*
+              "`NamedTuple` of tags or a `ParameterTransform`: the inverse is "*
+              "derived automatically.")
+    pt = ParameterTransform(transform)
+    (pt.to,pt.from)
+end
+
+normalize_transform(transform::ParameterTransform, inverse_transform::Union{Function,Nothing}) = begin
+    inverse_transform === nothing ||
+        error("`inverse_transform` must not be supplied when `transform` is a "*
+              "`NamedTuple` of tags or a `ParameterTransform`: the inverse is "*
+              "derived automatically.")
+    (transform.to,transform.from)
+end
+
+## For a declarative `transform`, checks that every tagged or
+## log-barycentrically-grouped parameter name is among `params`' names;
+## an arbitrary function pair is not checked (as it never has been).
+validate_partrans_names(transform::Function, params0::NamedTuple) = nothing
+
+validate_partrans_names(transform::NamedTuple, params0::NamedTuple) = begin
+    unk = setdiff(keys(transform),keys(params0))
+    isempty(unk) ||
+        error("`transform` names parameter(s) not present among `params`: $unk.")
+    nothing
+end
+
+validate_partrans_names(transform::ParameterTransform, params0::NamedTuple) = begin
+    tags,groups = partrans_spec(transform)
+    declared = union(keys(tags),(s for g ∈ groups for s ∈ g))
+    unk = setdiff(declared,keys(params0))
+    isempty(unk) ||
+        error("`transform` names parameter(s) not present among `params`: $unk.")
+    nothing
+end
+
 ## ------------------------------------------------------------- validation
 
 validate_mif2_args(
@@ -213,6 +335,7 @@ validate_mif2_args(
     cooling_type::Symbol,
     cooling_fraction_50::Real,
     trigger::Real,
+    target::Real,
     Nmif::Integer,
     Np::Integer,
     Nmonitor::Integer,
@@ -239,16 +362,6 @@ validate_mif2_args(
         error("`rw_sd_init` names not found among the (transformed) parameters: $(setdiff(rwik,keys(est0))).")
     isempty(intersect(rwk,rwik)) ||
         error("`rw_sd` and `rw_sd_init` must not share parameter names: $(intersect(rwk,rwik)).")
-    for k ∈ rwk
-        v = getproperty(rw_sd,k)
-        (v isa Real && isfinite(v) && v ≥ 0) ||
-            error("`rw_sd.$k` must be a finite, nonnegative real number.")
-    end
-    for k ∈ rwik
-        v = getproperty(rw_sd_init,k)
-        (v isa Real && isfinite(v) && v ≥ 0) ||
-            error("`rw_sd_init.$k` must be a finite, nonnegative real number.")
-    end
     for k ∈ union(rwk,rwik)
         getproperty(est0,k) isa AbstractFloat ||
             error("parameters to be estimated must be floating-point on the estimation "*
@@ -264,6 +377,7 @@ validate_mif2_args(
                   "$N observations; it must exceed $(1/(50*N)).")
     end
     (0 ≤ trigger ≤ 1) || error("`trigger` must lie in [0,1].")
+    (0 ≤ target ≤ 1) || error("`target` must lie in [0,1].")
     Nmif ≥ 0 || error("`Nmif` must be a nonnegative integer.")
     Np ≥ 1 || error("`Np` must be a positive integer.")
     Nmonitor ≥ 0 || error("`Nmonitor` must be a nonnegative integer.")
@@ -287,6 +401,7 @@ mif2_run(
     transform::Function,
     inverse_transform::Function,
     trigger::Real,
+    target::Real,
     Nmonitor::Integer,
     Np_monitor::Integer,
 ) where {E<:NamedTuple,R0<:NamedTuple} = begin
@@ -295,14 +410,16 @@ mif2_run(
     y = obs(object)
     N = length(t)
     trig = LogLik(trigger)
+    targ = LogLik(target)
     α = Float64(cooling_fraction_50)
     s_cool = cooling_setup(cooling_type,α,N)
+    sdschedule = resolve_sdschedule(rw_sd,rw_sd_init,N)
 
     theta = [inverse_transform(est[i]) for i ∈ eachindex(est)]
     Q = eltype(theta)
     estbuf = similar(est)
-    wcarry = zeros(LogLik,Np)
-    cumw = similar(wcarry)
+    w = ones(LogLik,Np)
+    work = similar(w)
     perm = zeros(Int,Np)
     cll = fill(LogLik(NaN),N)
     ess = fill(LogLik(NaN),N)
@@ -316,17 +433,17 @@ mif2_run(
 
     traces_ = copy(tr0)
     monitor_ll = LogLik(NaN)
+    ## the weighted parameter mean at the final observation time, as in
+    ## R pomp; with Nmif=0 (the `for m` loop below never executes) this
+    ## is the plain mean of the untouched starting cloud
+    estbar = weighted_mean(est,w)
 
     for m ∈ (m0+1):(m0+Nmif)
-        fill!(wcarry,0)
+        fill!(w,1)
         t0 = t0_0
         for n ∈ 1:N
             c = cooling(cooling_type,m,n,N,α,s_cool)
-            if n==1 && !isempty(rw_sd_init)
-                perturb!(est,merge(rw_sd,rw_sd_init),c)
-            else
-                perturb!(est,rw_sd,c)
-            end
+            perturb!(est,sdschedule[n],c)
             for i ∈ eachindex(est)
                 @inbounds theta[i] = inverse_transform(est[i])
             end
@@ -338,12 +455,22 @@ mif2_run(
                 object,t0,xf,xp,ell4,
                 @view(t[[n]]),ybuf,theta,chunks,thetabufs,
             )
-            wpfilt_step_comps!(
-                @view(cll[n]),@view(ess[n]),@view(resamp[n]),
-                wcarry,@view(ell4[1,:,1,1]),cumw,perm,
+            pfilt_step_comps!(
+                @view(cll[n]),@view(ess[n]),
+                @view(ell4[1,:,1,1]),perm,
                 @view(xp[1,:,1]),@view(xf[:,1]),
-                trig,
+                w,work,
+                trig,targ,
+                @view(resamp[n]),
             )
+            if n==N
+                ## the general step normalizes the total log weights in
+                ## place into `ell4` and leaves them untouched by
+                ## resampling, so this is the pre-resampling combined
+                ## weighted particle representation, aligned with `est`
+                ## before the ancestry permutation just below
+                estbar = weighted_mean(est,exp.(@view(ell4[1,:,1,1])))
+            end
             if resamp[n]
                 for j ∈ eachindex(perm)
                     @inbounds estbuf[j] = est[perm[j]]
@@ -352,7 +479,6 @@ mif2_run(
             end
             t0 = t[n]
         end
-        estbar = weighted_mean(est,wcarry)
         thetabar = inverse_transform(estbar)
         if Nmonitor > 0
             reps = [
@@ -366,17 +492,17 @@ mif2_run(
         end
     end
 
-    thetafinal = inverse_transform(weighted_mean(est,wcarry))
+    thetafinal = inverse_transform(estbar)
 
     Mif2dPompObject(
         pomp(object;params=thetafinal),
         m0+Nmif,Np,
         rw_sd,rw_sd_init,
-        cooling_type,α,trig,
+        cooling_type,α,trig,targ,
         transform,inverse_transform,
         [inverse_transform(e) for e ∈ est],
         est,
-        wcarry,
+        log.(w),
         traces_,
         cll,ess,resamp,
         sum(cll),
@@ -391,8 +517,8 @@ end
         Nmif = 1, Np = 1, rw_sd, rw_sd_init = (;),
         params = coef(object),
         cooling_type = :geometric, cooling_fraction_50 = 0.5,
-        transform = identity, inverse_transform = identity,
-        trigger = 1, Nmonitor = 0, Np_monitor = Np,
+        transform = identity, inverse_transform = nothing,
+        trigger = 1, target = 0, Nmonitor = 0, Np_monitor = Np,
         kwargs...,
     )
 
@@ -409,25 +535,49 @@ resampled together, using the same ancestry indices.
 ## Arguments
 
 - `Nmif`: number of IF2 iterations.
-- `Np`: number of particles.
+- `Np`: number of particles. `params` may instead supply the starting
+  parameter cloud directly (see below), in which case `Np` defaults to
+  its length and, if given explicitly, must equal it.
 - `rw_sd`: a `NamedTuple` of random-walk standard deviations, on the
   estimation scale, for the parameters to be estimated. Parameters not
-  named in `rw_sd` (or `rw_sd_init`) are held fixed.
-- `rw_sd_init`: as `rw_sd`, but for parameters perturbed only at the
-  first observation time (matching R `pomp`'s `ivp`). Its keys must be
-  disjoint from those of `rw_sd`.
+  named in `rw_sd` (or `rw_sd_init`) are held fixed. Each entry may be a
+  nonnegative real number (constant across observation times), a vector
+  of length equal to the number of observation times, a function of the
+  1-based observation index returning a nonnegative real number, or an
+  [`ivp`](@ref) (nonzero only immediately before specified observation
+  times).
+- `rw_sd_init`: as `rw_sd`, but restricted to a nonnegative real number
+  for each named parameter, giving a perturbation applied only before
+  the first observation time (equivalent to naming the same parameter
+  with `ivp(sd,lags=1)` in `rw_sd`, matching R `pomp`'s `ivp`). Its keys
+  must be disjoint from those of `rw_sd`.
 - `cooling_type`: `:geometric` or `:hyperbolic`.
 - `cooling_fraction_50`: the fraction by which the random-walk standard
   deviation shrinks after 50 IF2 iterations.
-- `transform`, `inverse_transform`: functions mapping a natural-scale
-  parameter `NamedTuple` to and from an unconstrained estimation scale
-  (e.g. log/logit), and back. Perturbation is applied on the estimation
-  scale. Default to `identity`.
-- `trigger`: the ESS-resampling trigger passed to the shared
-  [`wpfilt_step_comps!`](@ref) step routine (see [`wpfilter`](@ref)).
-  The IF2 theory of Ionides et al. (2015) requires resampling at every
-  observation time, so the default is `trigger = 1`; it is exposed as an
-  advanced knob for experimentation only.
+- `params`: the starting parameter set, on the natural scale, for the
+  particle cloud -- either a single `NamedTuple`, replicated `Np` times,
+  or an `AbstractVector` of `NamedTuple`s (sharing the same parameter
+  names) giving a non-degenerate starting cloud directly. In the latter
+  case, the base parameter set and the iteration-0 entry of `traces`
+  are the natural-scale image of the plain mean, on the estimation
+  scale, of the starting cloud.
+- `transform`, `inverse_transform`: the parameter transformation mapping
+  the natural scale to and from the estimation scale on which
+  perturbation is applied; `transform` accepts one of three forms: (i)
+  a `Function`, paired with `inverse_transform` (a `Function`, default
+  `identity`); (ii) a `NamedTuple` tagging parameters `:log`, `:logit`,
+  or `:identity` (see [`ParameterTransform`](@ref)), with
+  `inverse_transform` left at its default of `nothing` since the inverse
+  is derived; or (iii) a [`ParameterTransform`](@ref), built the same
+  way and additionally allowing log-barycentric-transformed groups,
+  again with `inverse_transform` left at its default.
+- `trigger`, `target`: as in [`pfilter`](@ref) -- (state, parameter)
+  particle pairs are resampled together whenever the effective sample
+  size falls to `trigger*Np` or below, with selection probability and
+  retained weight governed by `target`. The IF2 theory of Ionides et al.
+  (2015) requires equally weighted resampling at every observation time,
+  so the defaults are `trigger = 1`, `target = 0`; both are exposed for
+  experimentation only.
 - `Nmonitor`, `Np_monitor`: if `Nmonitor > 0`, an additional `Nmonitor`
   unperturbed `pfilter` runs (at `Np_monitor` particles) are performed at
   the end of each iteration, and their log-mean-exp is recorded as
@@ -442,41 +592,68 @@ needed. `kwargs...` can be used to modify or unset additional fields.
 mif2(
     object::ValidPompData;
     Nmif::Integer = 1,
-    Np::Integer = 1,
+    Np::Union{Integer,Nothing} = nothing,
     rw_sd::NamedTuple,
     rw_sd_init::NamedTuple = (;),
-    params::P = coef(object),
+    params::Union{NamedTuple,AbstractVector{<:NamedTuple}} = coef(object),
     cooling_type::Symbol = :geometric,
     cooling_fraction_50::Real = 0.5,
-    transform::Function = identity,
-    inverse_transform::Function = identity,
+    transform::Union{Function,NamedTuple,ParameterTransform} = identity,
+    inverse_transform::Union{Function,Nothing} = nothing,
     trigger::Real = 1,
+    target::Real = 0,
     Nmonitor::Integer = 0,
-    Np_monitor::Integer = Np,
+    Np_monitor::Union{Integer,Nothing} = nothing,
     rinit::Union{Function,Nothing,Missing} = missing,
     rprocess::Union{PompPlugin,Nothing,Missing} = missing,
     logdmeasure::Union{Function,Nothing,Missing} = missing,
     kwargs...,
-) where {P<:NamedTuple} = begin
-    object = pomp(object;params,rinit,rprocess,logdmeasure,kwargs...)
+) = begin
+    to,from = normalize_transform(transform,inverse_transform)
+    if params isa AbstractVector
+        isempty(params) &&
+            error("`params`, given as a vector of initial parameter sets, must be nonempty.")
+        ks0 = keys(params[1])
+        all(p -> keys(p)==ks0,params) ||
+            error("all entries of the initial parameter cloud `params` must share "*
+                  "the same parameter names.")
+        Np_ = if Np === nothing
+            length(params)
+        else
+            Np == length(params) ||
+                error("`Np` must equal `length(params)` when `params` is a vector of "*
+                      "initial parameter sets (got Np=$Np, length(params)=$(length(params))).")
+            Np
+        end
+        params0 = params[1]
+        est0 = [to(p) for p ∈ params]
+        params_base = from(weighted_mean(est0,ones(LogLik,length(est0))))
+    else
+        Np_ = Np === nothing ? 1 : Np
+        params0 = params
+        est0 = fill(to(params),Np_)
+        params_base = params
+    end
+    Np_monitor_ = Np_monitor === nothing ? Np_ : Np_monitor
+    validate_partrans_names(transform,params0)
+    object = pomp(object;params=params_base,rinit,rprocess,logdmeasure,kwargs...)
     N = length(times(object))
     validate_mif2_args(
-        params,transform,inverse_transform,rw_sd,rw_sd_init,
-        cooling_type,cooling_fraction_50,trigger,
-        Nmif,Np,Nmonitor,Np_monitor,N,
+        params0,to,from,rw_sd,rw_sd_init,
+        cooling_type,cooling_fraction_50,trigger,target,
+        Nmif,Np_,Nmonitor,Np_monitor_,N,
     )
-    est0 = fill(transform(params),Np)
     tr0 = if Nmonitor > 0
-        [(;iteration=0,logLik=LogLik(NaN),monitor_logLik=LogLik(NaN),params...)]
+        [(;iteration=0,logLik=LogLik(NaN),monitor_logLik=LogLik(NaN),params_base...)]
     else
-        [(;iteration=0,logLik=LogLik(NaN),params...)]
+        [(;iteration=0,logLik=LogLik(NaN),params_base...)]
     end
     mif2_run(
         object,0,est0,tr0,
-        Nmif,Np,rw_sd,rw_sd_init,
+        Nmif,Np_,rw_sd,rw_sd_init,
         cooling_type,cooling_fraction_50,
-        transform,inverse_transform,
-        trigger,Nmonitor,Np_monitor,
+        to,from,
+        trigger,target,Nmonitor,Np_monitor_,
     )
 end
 
@@ -491,7 +668,9 @@ from scratch, call `mif2(pomp(object); kwargs...)`.
 
 `Np` cannot be changed on continuation (the stored particle cloud has a
 fixed size); other settings default to the values used previously but
-may be overridden.
+may be overridden. As on a fresh call, a declarative `transform` (a
+`NamedTuple` of tags or a [`ParameterTransform`](@ref)) must not be
+paired with an explicit `inverse_transform`.
 """
 mif2(
     object::Mif2dPompObject;
@@ -501,29 +680,36 @@ mif2(
     rw_sd_init::NamedTuple = object.rw_sd_init,
     cooling_type::Symbol = object.cooling_type,
     cooling_fraction_50::Real = object.cooling_fraction_50,
-    transform::Function = object.transform,
-    inverse_transform::Function = object.inverse_transform,
+    transform::Union{Function,NamedTuple,ParameterTransform,Nothing} = nothing,
+    inverse_transform::Union{Function,Nothing} = nothing,
     trigger::Real = object.trigger,
+    target::Real = object.target,
     Nmonitor::Integer = object.Nmonitor,
     Np_monitor::Integer = Np,
     kwargs...,
 ) = begin
     Np == object.Np ||
         error("`Np` cannot be changed on continuation (got Np=$Np, stored cloud has $(object.Np)).")
+    to,from = if transform === nothing
+        (object.transform,object.inverse_transform)
+    else
+        normalize_transform(transform,inverse_transform)
+    end
     base = pomp(object;kwargs...)
     N = length(times(base))
     params0 = coef(base)
+    transform === nothing || validate_partrans_names(transform,params0)
     validate_mif2_args(
-        params0,transform,inverse_transform,rw_sd,rw_sd_init,
-        cooling_type,cooling_fraction_50,trigger,
+        params0,to,from,rw_sd,rw_sd_init,
+        cooling_type,cooling_fraction_50,trigger,target,
         Nmif,Np,Nmonitor,Np_monitor,N,
     )
     mif2_run(
         base,object.Nmif,copy(object.estcloud),copy(object.traces),
         Nmif,Np,rw_sd,rw_sd_init,
         cooling_type,cooling_fraction_50,
-        transform,inverse_transform,
-        trigger,Nmonitor,Np_monitor,
+        to,from,
+        trigger,target,Nmonitor,Np_monitor,
     )
 end
 

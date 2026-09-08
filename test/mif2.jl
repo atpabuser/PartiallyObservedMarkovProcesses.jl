@@ -103,15 +103,21 @@ using Test
     @test length(cond_logLik(fit))==N
     @test length(eff_sample_size(fit))==N
     @test length(resampled(fit))==N
+    ## the IF2 theory of Ionides et al. (2015) requires resampling at
+    ## every observation time when trigger=1 (the default)
+    @test all(resampled(fit))
     @test fit.perturbed_logLik==sum(cond_logLik(fit))
     @test occursin(r"Mif2dPompObject .* Nmif=.*Np=",sprint(show,fit))
 
-    ## fixed parameters (not named in rw_sd) must be untouched exactly:
-    ## use k=7.0, an exactly-representable value whose weighted mean over
-    ## an unperturbed, never-diverging cloud is exact in floating point.
+    ## fixed parameters (not named in rw_sd) must be untouched, up to
+    ## floating-point roundoff: since the point estimate is now the
+    ## R-pomp-style weighted mean at the final observation time (item 5),
+    ## and the weights are not exactly uniform, an unperturbed parameter
+    ## carried by every particle is only exact under equal weights, not
+    ## bit-exact in general.
     fit2 = mif2(P; Nmif=3, Np=100, params=p1, rw_sd=(a=0.02,))
-    @test coef(fit2).k === p1.k
-    @test coef(fit2).x0 === p1.x0
+    @test coef(fit2).k ≈ p1.k rtol=1e-12
+    @test coef(fit2).x0 ≈ p1.x0 rtol=1e-12
 
     ## Nmif = 0: no iterations, coef unchanged, single trace row, and the
     ## per-timestep diagnostics must be well-defined placeholders (NaN/false),
@@ -205,6 +211,81 @@ using Test
         @test all(isfinite,values(coef(fitn)))
     end
 
+    ## --- declarative `transform` equivalence --------------------------------
+    ## a `NamedTuple` of tags must produce exactly the same random-number
+    ## stream, and so exactly the same traces, as the equivalent hand-written
+    ## transformation pair.
+    tr_hand = p -> merge(p,(a=log(p.a),))
+    itr_hand = p -> merge(p,(a=exp(p.a),))
+    Random.seed!(4242)
+    fit_decl = mif2(P; Nmif=3, Np=50, params=p1, rw_sd=(a=0.02,k=0.02), transform=(a=:log,))
+    Random.seed!(4242)
+    fit_hand = mif2(
+        P; Nmif=3, Np=50, params=p1, rw_sd=(a=0.02,k=0.02),
+        transform=tr_hand, inverse_transform=itr_hand,
+    )
+    @test isequal(traces(fit_decl),traces(fit_hand))
+    @test fit_decl.estcloud==fit_hand.estcloud
+
+    ## a `NamedTuple` of tags rejects an explicit `inverse_transform`
+    @test_throws r"must not be supplied" mif2(
+        P;Nmif=1,Np=10,params=p1,rw_sd=(a=0.02,),
+        transform=(a=:log,),inverse_transform=exp,
+    )
+
+    ## --- time-varying `rw_sd` and `ivp` --------------------------------------
+    ## `ivp(sd)` and the equivalent explicit length-N vector must give
+    ## exactly the same random-number stream.
+    vecsd = [n==1 ? 0.05 : 0.0 for n ∈ 1:N]
+    Random.seed!(77)
+    fit_ivp2 = mif2(P; Nmif=2, Np=50, params=p1, rw_sd=(a=ivp(0.05),k=0.02))
+    Random.seed!(77)
+    fit_vec = mif2(P; Nmif=2, Np=50, params=p1, rw_sd=(a=vecsd,k=0.02))
+    @test isequal(traces(fit_ivp2),traces(fit_vec))
+
+    ## a function of the observation index must match the equivalent
+    ## explicit vector under the same seed.
+    fsd = n -> n==3 ? 0.2 : 0.0
+    vecsd2 = [n==3 ? 0.2 : 0.0 for n ∈ 1:N]
+    Random.seed!(88)
+    fit_fn = mif2(P; Nmif=2, Np=50, params=p1, rw_sd=(a=fsd,))
+    Random.seed!(88)
+    fit_vec2 = mif2(P; Nmif=2, Np=50, params=p1, rw_sd=(a=vecsd2,))
+    @test isequal(traces(fit_fn),traces(fit_vec2))
+
+    ## a vector of the wrong length errors
+    @test_throws r"length" mif2(P;Nmif=1,Np=10,params=p1,rw_sd=(a=fill(0.01,N-1),))
+
+    ## negative random-walk standard deviations error, whether given as a
+    ## vector entry or via `ivp`
+    @test_throws r"finite, nonnegative" mif2(P;Nmif=1,Np=10,params=p1,rw_sd=(a=[-0.1;zeros(N-1)],))
+    @test_throws r"finite, nonnegative" mif2(P;Nmif=1,Np=10,params=p1,rw_sd=(a=ivp(-0.1),))
+
+    ## `ivp` with a range of lags runs without error
+    fit_range = mif2(P; Nmif=1, Np=10, params=p1, rw_sd=(a=ivp(0.1;lags=3:5),))
+    @test fit_range isa POMP.Mif2dPompObject
+
+    ## --- non-degenerate initial cloud ----------------------------------------
+    Random.seed!(55)
+    cloud0 = [merge(p1,(a=p1.a*(1+0.01*randn()),)) for _ ∈ 1:50]
+    fitcloud = mif2(P; Nmif=2, params=cloud0, rw_sd=(a=0.02,k=0.02))
+    @test fitcloud.Np==50
+    @test length(fitcloud.estcloud)==50
+
+    @test_throws r"Np.*must equal" mif2(P;Nmif=1,params=cloud0,Np=49,rw_sd=(a=0.02,))
+
+    ## the iteration-0 trace row is the inverse-transformed (here trivial,
+    ## since `transform` defaults to `identity`) estimation-scale mean of
+    ## the starting cloud
+    meancloud = POMP.weighted_mean(cloud0,ones(length(cloud0)))
+    @test traces(fitcloud)[1].a ≈ meancloud.a
+    @test traces(fitcloud)[1].k == meancloud.k
+
+    ## --- `target` -------------------------------------------------------------
+    fit_target = mif2(P; Nmif=2, Np=100, params=p1, rw_sd=(a=0.02,k=0.02), target=0.5)
+    @test all(r -> isfinite(r.logLik),traces(fit_target)[2:end])
+    @test_throws r"target.*\[0,1\]" mif2(P;Nmif=1,Np=10,params=p1,rw_sd=(a=0.02,),target=1.2)
+
     ## --- the key falsifiable convergence test ------------------------------
     ## Simulate from a Gompertz model at known truth θ*, start mif2 displaced
     ## from the truth, and require the point estimate to move substantially
@@ -252,5 +333,17 @@ using Test
         )
         @test dist(coef(fitg)) < RATIO*dist(θ0)
     end
+
+    ## declarative `transform` on all five (positive) Gompertz parameters:
+    ## a short run should move the perturbed-model log likelihood uphill.
+    Random.seed!(2024)
+    Pg2 = simulate(mkgompertz();params=θstar,nsim=1)[1]
+    fitg2 = mif2(
+        Pg2; Nmif=10, Np=200, params=θ0,
+        rw_sd=(r=0.02,K=0.02,σₚ=0.02,σₘ=0.02,X0=0.02),
+        transform=(r=:log,K=:log,σₚ=:log,σₘ=:log,X0=:log),
+        cooling_fraction_50=0.5,
+    )
+    @test traces(fitg2)[end].logLik ≥ traces(fitg2)[2].logLik-50
 
 end

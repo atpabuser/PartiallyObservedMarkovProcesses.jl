@@ -61,7 +61,7 @@ include("wpfilter.jl")
 export ParameterTransform
 include("partrans.jl")
 
-export mif2, traces
+export mif2, traces, ivp
 include("mif2.jl")
 
 export traj_match_objfun
