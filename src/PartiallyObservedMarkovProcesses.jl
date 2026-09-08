@@ -52,10 +52,10 @@ include("logdprior.jl")
 export simulate, simulate_array
 include("simulate.jl")
 
-export pfilter, logLik, eff_sample_size, cond_logLik
+export pfilter, logLik, eff_sample_size, cond_logLik, resampled
 include("pfilter.jl")
 
-export wpfilter, resampled
+export wpfilter
 include("wpfilter.jl")
 
 export mif2, traces

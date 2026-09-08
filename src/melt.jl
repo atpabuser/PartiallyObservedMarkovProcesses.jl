@@ -44,25 +44,12 @@ end
 """
     melt(x::PfilterdPompObject; id...)
 
-Convert a `PfilterdPompObject` to a data frame, with columns for time, observables, and latent states, if present, as well as effective sample size and conditional log likelihood.
+Convert a `PfilterdPompObject` to a data frame, with columns for time,
+observables, and latent states, if present, as well as effective sample
+size, conditional log likelihood, and whether systematic resampling
+occurred.
 """
 melt(x::PfilterdPompObject; id...) =
-    hcat(
-        melt(pomp(x);id...),
-        DataFrame(
-            ess=x.eff_sample_size,
-            cond_logLik=x.cond_logLik
-        )
-    )
-
-"""
-    melt(x::WpfilterdPompObject; id...)
-
-Convert a `WpfilterdPompObject` to a data frame, with columns for time,
-observables, and latent states, if present, as well as effective sample
-size, conditional log likelihood, and whether resampling occurred.
-"""
-melt(x::WpfilterdPompObject; id...) =
     hcat(
         melt(pomp(x);id...),
         DataFrame(

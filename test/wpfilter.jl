@@ -44,14 +44,14 @@ using Test
     N = length(times(P))
 
     W = wpfilter(P,Np=1000,params=p1,trigger=1.0)
-    @test W isa POMP.WpfilterdPompObject
+    @test W isa POMP.PfilterdPompObject
     @test size(W.filt)==size(W.pred)==size(W.weights)==(N,1000)
     @test length(W.logweights)==1000
     @test length(cond_logLik(W))==N
     @test length(eff_sample_size(W))==N
     @test length(resampled(W))==N
     @test logLik(W)==sum(cond_logLik(W))
-    @test occursin(r"WpfilterdPompObject .* Np=.*trigger=",sprint(show,W))
+    @test occursin(r"PfilterdPompObject .* Np=.*trigger=",sprint(show,W))
 
     d = melt(W)
     @test propertynames(d)==[:time,:y,:x,:ess,:cond_logLik,:resampled]
@@ -72,7 +72,7 @@ using Test
     @test eff_sample_size(W0)[end] < eff_sample_size(W0)[1]
     @test all(W0.filt.==W0.pred)
 
-    ## bit-identity with pfilter at trigger=1, single-threaded only
+    ## bit-identity with pfilter at trigger=1, target=0, single-threaded only
     if Threads.nthreads()==1
         Random.seed!(42)
         Q = pfilter(P,Np=500,params=p1)
@@ -96,7 +96,8 @@ using Test
     @test sum(cond_logLik(Wc)) ≈ logmeanexp(per_path) atol=1e-8
 
     ## constant-likelihood invariance: with a flat logdmeasure, the carried
-    ## log-weights must stay exactly zero (mean-one) at every trigger.
+    ## weighted representation must stay exactly uniform (unit weight) at
+    ## every trigger.
     Pconst = pomp(P;logdmeasure=function (;_...) -1.234 end)
     for trig ∈ (0.0,0.5,1.0)
         Wk = wpfilter(Pconst,Np=50,params=p1,trigger=trig)
@@ -114,7 +115,7 @@ using Test
     @test Wd.filt==Wd.pred
     @test all(Wd.logweights.==0)
 
-    ## re-running on a WpfilterdPompObject
+    ## re-running on a PfilterdPompObject via wpfilter
     W2 = wpfilter(W1,Np=200)
     @test W2.Np==200
     @test W2.trigger==W1.trigger

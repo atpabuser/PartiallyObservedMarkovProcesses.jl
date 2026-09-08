@@ -77,8 +77,8 @@ using BenchmarkTools
     rinit!(Q,x0)
 
     d = melt(Q);
-    @test size(d)==(21,5)
-    @test propertynames(d)==[:time, :y, :x, :ess, :cond_logLik]
+    @test size(d)==(21,6)
+    @test propertynames(d)==[:time, :y, :x, :ess, :cond_logLik, :resampled]
 
     P1 = pomp(P;logdmeasure=function (;_...) -Inf end)
     Q1 = pfilter(P1,Np=100,params=p1)
@@ -94,5 +94,24 @@ using BenchmarkTools
     @test logmeanexp(logLik.(Q2),ess=true) isa @NamedTuple{est::Float64,ess::Float64}
     @test logmeanexp(logLik.(Q2),ess=true,se=true) isa @NamedTuple{est::Float64,se::Float64,ess::Float64}
     @test logmeanexp(logLik.(Q2)) > mean(logLik.(Q2))
+
+    ## consistency check: the weighted particle representation preserves
+    ## the likelihood -- log-mean-exp of replicate log likelihoods should
+    ## agree (within a generous tolerance) whether resampling is performed
+    ## at every observation time with equally weighted particles
+    ## (trigger=1, target=0), at every observation time with the full
+    ## weighted representation carried forward (trigger=1, target=0.5),
+    ## or only when triggered by effective-sample-size deficiency
+    ## (trigger=0.5, target=0).
+    Random.seed!(20260907)
+    settings = [(trigger=1.0,target=0.0),(trigger=1.0,target=0.5),(trigger=0.5,target=0.0)]
+    lls = [
+        logmeanexp([
+            logLik(pfilter(P,Np=500,params=p1,trigger=trigger,target=target))
+            for _ ∈ 1:20
+        ])
+        for (trigger,target) ∈ settings
+    ]
+    @test maximum(lls)-minimum(lls) < 0.5
 
 end
