@@ -312,7 +312,7 @@ pfilt_step_comps!(
 ) where {W<:AbstractFloat,I<:Integer,X<:NamedTuple} = begin
     logwmax = compute_ess_logLik!(ess, logLik, logw, w)
     if isfinite(logwmax) && ess[] ≤ trigger*n
-        logLik[] += systematic_resample!(p, w, work, target)
+        systematic_resample!(p, w, work, target)
         @inbounds xf .= xp[p]
         resamp[] = true
     else
@@ -439,12 +439,14 @@ end
 ## overwritten with the (unit-mean renormalized) retained weights.
 ## `ucum` is working memory.
 ##
-## The properly weighted representation after selection assigns the
-## selected particle the weight w^β·(Σᵢ wᵢ^(1-β))/n; the factor removed
-## in renormalizing to unit mean is therefore returned (as a log), to
-## be credited to the conditional log likelihood so that the product of
-## the conditional likelihoods remains the unbiased likelihood estimate
-## for every β. This quantity vanishes at β = 0 and β = 1.
+## Renormalizing the retained weights to unit mean rescales them all by
+## a common factor. Each conditional likelihood is formed as the mean
+## of the carried weights against the next measurement density, so that
+## factor cancels against the following step's normalization and the
+## product of the conditional likelihoods remains an unbiased estimate
+## of the likelihood for every β -- the same bookkeeping as the ratio
+## of successive unnormalized masses used in the R implementation. No
+## compensating factor is therefore credited here.
 systematic_resample!(
     p::AbstractArray{I,1},
     w::AbstractArray{W,1},
@@ -475,9 +477,8 @@ systematic_resample!(
     @inbounds for j ∈ eachindex(w)
         w[j] = ucum[j]
     end
-    m::W = mean(w)
-    w ./= m # subsequent steps rely on the weights having unit mean
-    log(m*s/n)
+    w ./= mean(w) # subsequent steps rely on the weights having unit mean
+    nothing
 end
 
 trace_ancestry!(
