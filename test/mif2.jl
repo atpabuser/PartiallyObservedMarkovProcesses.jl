@@ -97,7 +97,11 @@ using Test
     @test length(traces(fit))==6
     @test traces(fit)[1].iteration==0
     @test isnan(traces(fit)[1].logLik)
-    @test keys(traces(fit)[1])==(:iteration,:logLik,keys(p1)...)
+    ## `monitor_logLik` is present in every row, `NaN` when monitoring is
+    ## off, so that the row type does not depend on `Nmonitor` and a run
+    ## started without monitoring can be continued with it.
+    @test keys(traces(fit)[1])==(:iteration,:logLik,:monitor_logLik,keys(p1)...)
+    @test isnan(traces(fit)[1].monitor_logLik)
     @test [r.iteration for r ∈ traces(fit)]==0:5
     @test length(fit.paramcloud)==length(fit.estcloud)==200
     @test length(cond_logLik(fit))==N
@@ -167,8 +171,8 @@ using Test
 
     ## melt
     d = melt(fit)
-    @test propertynames(d)==[:iteration,:logLik,:a,:k,:x0]
-    @test size(d)==(6,5)
+    @test propertynames(d)==[:iteration,:logLik,:monitor_logLik,:a,:k,:x0]
+    @test size(d)==(6,6)
 
     ## continuation
     fitc = mif2(fit3; Nmif=3)
@@ -345,5 +349,73 @@ using Test
         cooling_fraction_50=0.5,
     )
     @test traces(fitg2)[end].logLik ≥ traces(fitg2)[2].logLik-50
+
+end
+
+@info h2("mif2 continuation semantics")
+
+@testset verbose=true "mif2 continuation" begin
+
+    ## Same model as the `mif2` testset above.
+    Random.seed!(263260083)
+    rin = function(;x0,_...); (x=rand(Poisson(x0)),); end
+    rlin = function (;t,a,x,_...); (x=rand(Poisson(a*x)),); end
+    rmeas = function (;x,k,_...); (y=rand(NegativeBinomial(k,k/(k+x))),); end
+    logdmeas = function (;x,y,k,_...); logpdf(NegativeBinomial(k,k/(k+x)),y); end
+
+    p1 = (a=1.5,k=7.0,x0=5.0)
+    P = simulate(
+        t0=0,times=0:20,params=p1,
+        rinit=rin,rprocess=discrete_time(rlin,dt=1),
+        rmeasure=rmeas,logdmeasure=logdmeas,
+    )[1]
+
+    ## --- changing `transform` on continuation --------------------------------
+    ## The stored cloud lives on the estimation scale of the previous run.
+    ## Continuing under a different transformation must carry it across,
+    ## leaving the natural-scale particle values intact; feeding the old
+    ## cloud to the new inverse transformation would exponentiate them.
+    Random.seed!(808)
+    f_id = mif2(P; Nmif=2, Np=40, params=p1, rw_sd=(a=0.02,))
+    before = [q.a for q ∈ f_id.paramcloud]
+
+    f_log = mif2(f_id; Nmif=0, transform=(a=:log,k=:log,x0=:log))
+    after = [q.a for q ∈ f_log.paramcloud]
+
+    ## Nmif=0 runs no iterations, so the natural-scale cloud must be
+    ## unchanged by the rebasing alone.
+    @test after ≈ before rtol=1e-12
+    ## and emphatically not exponentiated
+    @test maximum(after) < 10*maximum(before)
+
+    ## continuing under the new transform still runs and keeps the cloud finite
+    f_log2 = mif2(f_log; Nmif=2)
+    @test all(q -> isfinite(q.a) && q.a > 0,f_log2.paramcloud)
+    @test f_log2.Nmif == 4
+
+    ## an unchanged transform leaves the stored cloud bit-identical
+    Random.seed!(909)
+    g1 = mif2(P; Nmif=1, Np=20, params=p1, rw_sd=(a=0.02,))
+    g2 = mif2(g1; Nmif=0)
+    @test isequal(g2.estcloud,g1.estcloud)
+
+    ## --- trace schema is invariant in `Nmonitor` -----------------------------
+    ## Every row carries `monitor_logLik` (NaN when monitoring is off), so a
+    ## run started without monitoring can be continued with it.
+    Random.seed!(717)
+    h0 = mif2(P; Nmif=1, Np=20, params=p1, rw_sd=(a=0.02,))
+    @test haskey(traces(h0)[1],:monitor_logLik)
+    @test isnan(traces(h0)[end].monitor_logLik)
+
+    h1m = mif2(h0; Nmif=1, Nmonitor=2, Np_monitor=50)
+    @test length(traces(h1m)) == 3
+    @test isfinite(traces(h1m)[end].monitor_logLik)
+    @test isfinite(logLik(h1m))
+
+    ## --- `Np_monitor` persists across continuation ---------------------------
+    @test h1m.Np_monitor == 50
+    h2m = mif2(h1m; Nmif=1)
+    @test h2m.Np_monitor == 50
+    @test h2m.Nmonitor == 2
 
 end

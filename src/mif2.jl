@@ -39,6 +39,7 @@ struct Mif2dPompObject{
     perturbed_logLik::W
     monitor_logLik::W
     Nmonitor::Int
+    Np_monitor::Int
 end
 
 pomp(object::Mif2dPompObject) = object.pompobj
@@ -486,10 +487,14 @@ mif2_run(
                 for _ ∈ 1:Nmonitor
             ]
             monitor_ll = logmeanexp(reps)
-            push!(traces_,(;iteration=m,logLik=sum(cll),monitor_logLik=monitor_ll,thetabar...))
-        else
-            push!(traces_,(;iteration=m,logLik=sum(cll),thetabar...))
         end
+        ## `monitor_logLik` is present in every trace row, and is `NaN`
+        ## when monitoring is off. Emitting it conditionally would make
+        ## the row type depend on `Nmonitor`, so a run started with
+        ## `Nmonitor = 0` could not be continued with `Nmonitor > 0`:
+        ## the stored trace vector is concretely typed and would reject
+        ## the wider row.
+        push!(traces_,(;iteration=m,logLik=sum(cll),monitor_logLik=monitor_ll,thetabar...))
     end
 
     thetafinal = inverse_transform(estbar)
@@ -508,6 +513,7 @@ mif2_run(
         sum(cll),
         monitor_ll,
         Nmonitor,
+        Np_monitor,
     )
 end
 
@@ -643,11 +649,7 @@ mif2(
         cooling_type,cooling_fraction_50,trigger,target,
         Nmif,Np_,Nmonitor,Np_monitor_,N,
     )
-    tr0 = if Nmonitor > 0
-        [(;iteration=0,logLik=LogLik(NaN),monitor_logLik=LogLik(NaN),params_base...)]
-    else
-        [(;iteration=0,logLik=LogLik(NaN),params_base...)]
-    end
+    tr0 = [(;iteration=0,logLik=LogLik(NaN),monitor_logLik=LogLik(NaN),params_base...)]
     mif2_run(
         object,0,est0,tr0,
         Nmif,Np_,rw_sd,rw_sd_init,
@@ -671,6 +673,11 @@ fixed size); other settings default to the values used previously but
 may be overridden. As on a fresh call, a declarative `transform` (a
 `NamedTuple` of tags or a [`ParameterTransform`](@ref)) must not be
 paired with an explicit `inverse_transform`.
+
+Supplying a new `transform` carries the stored cloud onto the new
+estimation scale before resuming, so the particles retain their
+natural-scale values; without that step each particle would be
+reinterpreted under the wrong coordinates.
 """
 mif2(
     object::Mif2dPompObject;
@@ -685,7 +692,7 @@ mif2(
     trigger::Real = object.trigger,
     target::Real = object.target,
     Nmonitor::Integer = object.Nmonitor,
-    Np_monitor::Integer = Np,
+    Np_monitor::Integer = object.Np_monitor,
     kwargs...,
 ) = begin
     Np == object.Np ||
@@ -694,6 +701,20 @@ mif2(
         (object.transform,object.inverse_transform)
     else
         normalize_transform(transform,inverse_transform)
+    end
+    ## The stored `estcloud` is expressed on the estimation scale of the
+    ## *previous* run. If a new transformation is supplied, that cloud
+    ## must be carried onto the new estimation scale before it is used,
+    ## or every particle is reinterpreted under the wrong coordinates.
+    ## `paramcloud` is the natural-scale image of `estcloud`, so the new
+    ## estimation-scale cloud is its image under the new `to`. When the
+    ## transformation is unchanged the stored cloud is used directly,
+    ## which avoids an unnecessary `to∘from` round trip and keeps
+    ## continuation bit-exact.
+    est0 = if transform === nothing
+        copy(object.estcloud)
+    else
+        [to(p) for p ∈ object.paramcloud]
     end
     base = pomp(object;kwargs...)
     N = length(times(base))
@@ -705,7 +726,7 @@ mif2(
         Nmif,Np,Nmonitor,Np_monitor,N,
     )
     mif2_run(
-        base,object.Nmif,copy(object.estcloud),copy(object.traces),
+        base,object.Nmif,est0,copy(object.traces),
         Nmif,Np,rw_sd,rw_sd_init,
         cooling_type,cooling_fraction_50,
         to,from,
