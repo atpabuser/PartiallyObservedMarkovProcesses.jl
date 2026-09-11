@@ -28,8 +28,9 @@ struct Mif2dPompObject{
     cooling_fraction_50::W     # `NaN` when `cooling_type === :custom`
     trigger::W
     target::W
-    transform::Function
-    inverse_transform::Function
+    perturb::Union{Function,NamedTuple,Nothing}   # the raw specification
+    transform::Function          # to the averaging scale
+    inverse_transform::Function  # from the averaging scale
     paramcloud::Vector{Q}
     estcloud::Vector{E}
     logweights::Vector{W}
@@ -182,6 +183,105 @@ normalize_cooling(
     end
 end
 
+## ------------------------------------------------- perturbation kernel
+
+## Resolves the `perturb` keyword into an `RWKernel`. `nothing` gives the
+## transform-derived default, which is the historical behaviour and what
+## R `pomp` does; a bare function is taken as a natural-scale kernel of
+## the whole parameter tuple; a `NamedTuple` names one scalar kernel per
+## estimated parameter.
+normalize_perturb(perturb::Nothing, to::Function, from::Function, ::NamedTuple) =
+    TransformRW(to,from)
+
+normalize_perturb(perturb::Function, ::Function, ::Function, ::NamedTuple) =
+    FunctionRW(perturb)
+
+normalize_perturb(perturb::NamedTuple, ::Function, ::Function, sdkeys::NamedTuple) = begin
+    for k ∈ keys(perturb)
+        getproperty(perturb,k) isa ScalarRW ||
+            error("`perturb.$k` must be a per-parameter kernel such as "*
+                  "`lognormal_rw()`; got $(typeof(getproperty(perturb,k))).")
+    end
+    ## Every perturbed parameter needs a kernel, and a kernel for a
+    ## parameter that is never perturbed would silently do nothing.
+    missing_ = setdiff(keys(sdkeys),keys(perturb))
+    isempty(missing_) ||
+        error("`perturb` must name every parameter named in `rw_sd`/`rw_sd_init`; "*
+              "missing: $(Tuple(missing_)).")
+    extra = setdiff(keys(perturb),keys(sdkeys))
+    isempty(extra) ||
+        error("`perturb` names parameter(s) not named in `rw_sd`/`rw_sd_init`, which "*
+              "would never be applied: $(Tuple(extra)).")
+    PerKeyRW(perturb)
+end
+
+## A kernel maps its declared support into itself (K4), so checking each
+## starting value once is enough and no guard is needed in the inner
+## loop. This runs before the averaging transformation is composed,
+## because that composition would itself fail first on an out-of-support
+## value -- taking the logit of a parameter exceeding one, say -- and the
+## resulting domain error says much less than this does.
+validate_kernel_support(::RWKernel, ::NamedTuple) = nothing
+
+validate_kernel_support(kernel::PerKeyRW, params::NamedTuple) = begin
+    for k ∈ keys(kernel.kers)
+        kk = getproperty(kernel.kers,k)
+        haskey(params,k) ||
+            error("`perturb` names parameter `$k`, which is not among the parameters.")
+        x = getproperty(params,k)
+        in_support(kk,x) ||
+            error("the starting value of `$k` is $x, which lies outside the support of "*
+                  "its `perturb` kernel: $(typeof(kk)) requires a value "*
+                  "$(support_description(kk)).")
+    end
+    nothing
+end
+
+## Resolves the scale on which the particle cloud is averaged to form the
+## point estimate. The cloud must be averaged on the scale on which the
+## kernel perturbs symmetrically, or a multiplicative perturbation is
+## paired with an arithmetic mean and the estimate is biased for a skewed
+## cloud. For the per-key form the kernels declare that scale themselves,
+## so the composition is exact and the mismatch is unconstructible; for
+## an opaque function the user's `transform` is used and the
+## responsibility is theirs.
+normalize_average(
+    perturb::Union{Nothing,Function},
+    transform_raw,
+    to::Function,
+    from::Function,
+) = (to,from)
+
+normalize_average(
+    perturb::NamedTuple,
+    transform_raw,
+    to::Function,
+    from::Function,
+) = begin
+    kernel_tags = NamedTuple{keys(perturb)}(map(mean_scale,values(perturb)))
+    if transform_raw isa Function
+        transform_raw === identity ||
+            error("a per-parameter `perturb` cannot be combined with a functional "*
+                  "`transform`: the averaging scale is composed from the kernels' "*
+                  "own declarations, which cannot be merged into an opaque function "*
+                  "pair. Supply `transform` as a `NamedTuple` of tags, or a "*
+                  "`ParameterTransform`, or omit it.")
+        pt = ParameterTransform(kernel_tags)
+        (pt.to,pt.from)
+    else
+        tags,groups = transform_raw isa ParameterTransform ?
+            partrans_spec(transform_raw) : (transform_raw,())
+        declared = union(keys(tags),(s for g ∈ groups for s ∈ g))
+        clash = intersect(declared,keys(kernel_tags))
+        isempty(clash) ||
+            error("parameter(s) $(Tuple(clash)) are given both a `perturb` kernel and "*
+                  "a `transform` tag; the averaging scale would be doubly specified. "*
+                  "Name each estimated parameter in one or the other.")
+        pt = ParameterTransform(merge(tags,kernel_tags);logbarycentric=groups)
+        (pt.to,pt.from)
+    end
+end
+
 ## --------------------------------------------------------------- rw_sd
 
 """
@@ -254,30 +354,6 @@ resolve_sdschedule(rw_sd::NamedTuple, rw_sd_init::NamedTuple, N::Integer) = begi
     ks = keys(merged)
     resolved = NamedTuple{ks}(map(k -> resolve_rw_sd_entry(getproperty(merged,k),N,k),ks))
     [NamedTuple{ks}(ntuple(d -> getproperty(resolved,ks[d])[n],length(ks))) for n ∈ 1:N]
-end
-
-## ------------------------------------------------------------ perturbation
-
-perturb!(
-    est::AbstractVector{E},
-    sd::NamedTuple,
-    c::Real,
-) where {E<:NamedTuple} = begin
-    ks = keys(sd)
-    if !isempty(ks)
-        for i ∈ eachindex(est)
-            @inbounds est[i] = merge(
-                est[i],
-                NamedTuple{ks}(
-                    ntuple(
-                        d -> getproperty(est[i],ks[d])+c*getproperty(sd,ks[d])*randn(),
-                        length(ks)
-                    )
-                )
-            )::E
-        end
-    end
-    nothing
 end
 
 ## ------------------------------------------------------------- point estimate
@@ -406,6 +482,7 @@ validate_mif2_args(
     Nmonitor::Integer,
     Np_monitor::Integer,
     N::Integer,
+    kernel::RWKernel,
 ) = begin
     est0 = transform(params)
     est0 isa NamedTuple || error("`transform` must return a `NamedTuple`.")
@@ -427,10 +504,18 @@ validate_mif2_args(
         error("`rw_sd_init` names not found among the (transformed) parameters: $(setdiff(rwik,keys(est0))).")
     isempty(intersect(rwk,rwik)) ||
         error("`rw_sd` and `rw_sd_init` must not share parameter names: $(intersect(rwk,rwik)).")
+    ## The perturbed entries are written back into whichever cloud the
+    ## kernel writes, under a `::E`/`::Q` assertion, so they must already
+    ## be floating-point on that cloud's scale -- the estimation scale for
+    ## the transform-derived default, the natural scale for any kernel
+    ## that acts there.
+    natural = primary(kernel) === :theta
+    scalename = natural ? "natural" : "estimation"
+    checked = natural ? params : est0
     for k ∈ union(rwk,rwik)
-        getproperty(est0,k) isa AbstractFloat ||
-            error("parameters to be estimated must be floating-point on the estimation "*
-                  "scale; got $(typeof(getproperty(est0,k))) for `$k`.")
+        getproperty(checked,k) isa AbstractFloat ||
+            error("parameters to be estimated must be floating-point on the "*
+                  "$scalename scale; got $(typeof(getproperty(checked,k))) for `$k`.")
     end
     ## The cooling specification is validated in `normalize_cooling`,
     ## which is where the three keywords are reconciled.
@@ -457,6 +542,8 @@ mif2_run(
     schedule::Function,
     cooling_type::Symbol,
     cooling_fraction_50::Real,
+    kernel::RWKernel,
+    perturb::Union{Function,NamedTuple,Nothing},
     transform::Function,
     inverse_transform::Function,
     trigger::Real,
@@ -489,6 +576,7 @@ mif2_run(
     theta = [inverse_transform(est[i]) for i ∈ eachindex(est)]
     Q = eltype(theta)
     estbuf = similar(est)
+    thetabuf = similar(theta)
     w = ones(LogLik,Np)
     work = similar(w)
     perm = zeros(Int,Np)
@@ -521,10 +609,11 @@ mif2_run(
         t0 = t0_0
         for n ∈ 1:N
             c = schedule(m,n,N)
-            perturb!(est,sdschedule[n],c)
-            for i ∈ eachindex(est)
-                @inbounds theta[i] = inverse_transform(est[i])
-            end
+            ## On return the kernel's primary cloud is current. The
+            ## transform-derived default writes `est` and derives
+            ## `theta`; a natural-scale kernel writes `theta` and leaves
+            ## `est` stale until it is needed at n == N.
+            perturb_cloud!(kernel,theta,est,sdschedule[n],c)
             if n==1
                 rinit!(object,xf;t0,params=theta)
             end
@@ -547,13 +636,12 @@ mif2_run(
                 ## resampling, so this is the pre-resampling combined
                 ## weighted particle representation, aligned with `est`
                 ## before the ancestry permutation just below
+                sync_est!(kernel,theta,est,transform)
                 estbar = weighted_mean(est,exp.(@view(ell4[1,:,1,1])))
             end
             if resamp[n]
-                for j ∈ eachindex(perm)
-                    @inbounds estbuf[j] = est[perm[j]]
-                end
-                est,estbuf = estbuf,est
+                theta,thetabuf,est,estbuf =
+                    permute_cloud!(kernel,theta,thetabuf,est,estbuf,perm)
             end
             t0 = t[n]
         end
@@ -575,15 +663,16 @@ mif2_run(
     end
 
     thetafinal = inverse_transform(estbar)
+    paramcloud,estcloud = final_clouds(kernel,theta,est,transform,inverse_transform)
 
     Mif2dPompObject(
         pomp(object;params=thetafinal),
         m0+Nmif,Np,
         rw_sd,rw_sd_init,
         schedule,cooling_type,α,trig,targ,
-        transform,inverse_transform,
-        [inverse_transform(e) for e ∈ est],
-        est,
+        perturb,transform,inverse_transform,
+        paramcloud,
+        estcloud,
         log.(w),
         traces_,
         cll,ess,resamp,
@@ -629,6 +718,34 @@ resampled together, using the same ancestry indices.
   1-based observation index returning a nonnegative real number, or an
   [`ivp`](@ref) (nonzero only immediately before specified observation
   times).
+- `perturb`: the perturbation kernel. Omitted (the default), the kernel
+  is derived from `transform`: an additive Gaussian increment on the
+  estimation scale, which for a `:log`-tagged parameter is a
+  multiplicative lognormal perturbation on the natural scale, matching R
+  `pomp`. Otherwise it acts on the *natural* scale and is either a
+  `NamedTuple` naming one kernel per estimated parameter --
+  [`normal_rw`](@ref), [`lognormal_rw`](@ref),
+  [`logitnormal_rw`](@ref), [`student_rw`](@ref) -- or a function
+  `(θ,sd,c)` of one particle's natural-scale parameters, the
+  standard deviations for the current observation time, and the cooling
+  factor, returning a `NamedTuple` of the parameters it changed.
+
+  Note that `rw_sd` is then the *kernel's* scale parameter, and each
+  kernel documents what it means: the standard deviation of ``\\theta``
+  for `normal_rw`, of ``\\log\\theta`` for `lognormal_rw`, of
+  ``\\mathrm{logit}\\,\\theta`` for `logitnormal_rw`. Under the default
+  kernel with `transform = (θ=:log,)` it already is the standard
+  deviation of ``\\log\\theta``, so these agree and no existing
+  specification changes meaning.
+
+  The particle cloud is averaged on the scale on which the kernel
+  perturbs symmetrically, so that a multiplicative kernel is paired with
+  a geometric mean. In the `NamedTuple` form the kernels declare that
+  scale themselves and it is composed automatically, which is why naming
+  a parameter in both `perturb` and `transform` is an error rather than
+  a silent bias. A bare function cannot be introspected, so the
+  averaging scale is taken from `transform` and keeping the two
+  consistent is the caller's responsibility.
 - `rw_sd_init`: as `rw_sd`, but restricted to a nonnegative real number
   for each named parameter, giving a perturbation applied only before
   the first observation time (equivalent to naming the same parameter
@@ -694,6 +811,7 @@ mif2(
     rw_sd::NamedTuple,
     rw_sd_init::NamedTuple = (;),
     params::Union{NamedTuple,AbstractVector{<:NamedTuple}} = coef(object),
+    perturb::Union{Function,NamedTuple,Nothing} = nothing,
     cooling::Union{Symbol,Function,Nothing} = nothing,
     cooling_type::Union{Symbol,Nothing} = nothing,
     cooling_fraction_50::Real = 0.5,
@@ -738,17 +856,30 @@ mif2(
     object = pomp(object;params=params_base,rinit,rprocess,logdmeasure,kwargs...)
     N = length(times(object))
     schedule,ctype,α = normalize_cooling(cooling,cooling_type,cooling_fraction_50,N)
+    sdkeys = merge(rw_sd,rw_sd_init)
+    kernel = normalize_perturb(perturb,to,from,sdkeys)
+    validate_kernel_support(kernel,params0)
+    to_avg,from_avg = normalize_average(perturb,transform,to,from)
+    ## `est0` was built with the user's `to`, which for a per-key kernel
+    ## is not the averaging transformation, so the starting cloud has to
+    ## be carried across. When the two coincide -- always on the default
+    ## and bare-function paths -- the cloud is used as it stands, which
+    ## avoids a `to∘from` round trip whose floating-point residue
+    ## resampling would then amplify.
+    est1 = to_avg === to ? est0 : [to_avg(from(e)) for e ∈ est0]
     validate_mif2_args(
-        params0,to,from,rw_sd,rw_sd_init,
+        params0,to_avg,from_avg,rw_sd,rw_sd_init,
         trigger,target,
         Nmif,Np_,Nmonitor,Np_monitor_,N,
+        kernel,
     )
     tr0 = [(;iteration=0,logLik=LogLik(NaN),monitor_logLik=LogLik(NaN),params_base...)]
     mif2_run(
-        object,0,est0,tr0,
+        object,0,est1,tr0,
         Nmif,Np_,rw_sd,rw_sd_init,
         schedule,ctype,α,
-        to,from,
+        kernel,perturb,
+        to_avg,from_avg,
         trigger,target,Nmonitor,Np_monitor_,
     )
 end
@@ -788,6 +919,7 @@ mif2(
     cooling_type::Union{Symbol,Nothing} =
         (object.cooling_type === :custom ? nothing : object.cooling_type),
     cooling_fraction_50::Real = object.cooling_fraction_50,
+    perturb::Union{Function,NamedTuple,Nothing} = object.perturb,
     transform::Union{Function,NamedTuple,ParameterTransform,Nothing} = nothing,
     inverse_transform::Union{Function,Nothing} = nothing,
     trigger::Real = object.trigger,
@@ -822,16 +954,27 @@ mif2(
     params0 = coef(base)
     transform === nothing || validate_partrans_names(transform,params0)
     schedule,ctype,α = normalize_cooling(cooling,cooling_type,cooling_fraction_50,N)
+    sdkeys = merge(rw_sd,rw_sd_init)
+    kernel = normalize_perturb(perturb,to,from,sdkeys)
+    validate_kernel_support(kernel,params0)
+    ## When the transformation is not overridden, the stored pair is
+    ## already the averaging pair, so recomposing it would be wasted work
+    ## and, for the per-key form, would need the raw tags that are not
+    ## stored. Recompose only when a new transformation was supplied.
+    to_avg,from_avg = transform === nothing ?
+        (to,from) : normalize_average(perturb,transform,to,from)
     validate_mif2_args(
-        params0,to,from,rw_sd,rw_sd_init,
+        params0,to_avg,from_avg,rw_sd,rw_sd_init,
         trigger,target,
         Nmif,Np,Nmonitor,Np_monitor,N,
+        kernel,
     )
     mif2_run(
         base,object.Nmif,est0,copy(object.traces),
         Nmif,Np,rw_sd,rw_sd_init,
         schedule,ctype,α,
-        to,from,
+        kernel,perturb,
+        to_avg,from_avg,
         trigger,target,Nmonitor,Np_monitor,
     )
 end

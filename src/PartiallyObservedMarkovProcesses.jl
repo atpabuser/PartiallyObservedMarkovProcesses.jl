@@ -61,6 +61,9 @@ include("wpfilter.jl")
 export ParameterTransform
 include("partrans.jl")
 
+export RWKernel, ScalarRW, normal_rw, lognormal_rw, logitnormal_rw, student_rw
+include("perturb.jl")
+
 export mif2, traces, ivp, geometric_cooling, hyperbolic_cooling
 include("mif2.jl")
 
