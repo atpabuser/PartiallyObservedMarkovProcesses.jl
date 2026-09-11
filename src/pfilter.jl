@@ -779,12 +779,20 @@ end
 ## overwritten with the (unit-mean renormalized) retained weights.
 ## `ucum` is working memory.
 ##
-## The properly weighted representation after selection assigns the
-## selected particle the weight w^β·(Σᵢ wᵢ^(1-β))/n. Renormalizing the
-## retained weights to unit mean divides that by the common factor
-## c = m·(Σᵢ wᵢ^(1-β))/n, where m is the mean of the retained weights.
-## That factor is returned, as a log, to be credited to the conditional
-## log likelihood.
+## Selecting ancestor A_j with probability qᵢ = wᵢ^(1-β)/S, where
+## S = Σᵢ wᵢ^(1-β), changes the sampling measure, so the properly
+## weighted representation assigns the particle selected at position j
+## the importance weight
+##
+##     R_j = w_{A_j}/(n·q_{A_j}) = (S/n)·w_{A_j}^β,
+##
+## whose sample mean is c = (1/n)Σⱼ R_j = (S/n)·m, with
+## m = mean_j w_{A_j}^β. So c is the sample mean of the proper importance
+## weights: this resampling step's contribution to the normalizing
+## constant of the unnormalized measure. Renormalizing the retained
+## weights to unit mean stores R_j/c, so c must multiply the likelihood
+## accumulator, and is returned as a log for the caller to add to the
+## conditional log likelihood.
 ##
 ## c is conditionally mean-one, but it is a function of the selected
 ## ancestors and therefore correlated with everything those ancestors
@@ -818,7 +826,7 @@ systematic_resample!(
         end
         p[j] = i
     end
-    stot::W = s   # Σⱼ wⱼ^(1-β), retained for the mass credit below
+    stot::W = s   # S = Σⱼ wⱼ^(1-β), for the normalizing constant below
     @inbounds for j ∈ eachindex(p)
         ucum[j] = w[p[j]]^β
     end

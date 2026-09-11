@@ -63,10 +63,12 @@ using Test
     ## from N(0,1) at every step, independently of xₜ₋₁.  The one-step
     ## predictive density h(x) = ∫f(x′|x)g(yₜ₊₁|x′)dx′ is therefore the
     ## same for every particle, and when h is constant across the cloud
-    ## the power-renormalized resampling is exactly unbiased whatever it
-    ## does with the discarded mass.  This test is consequently blind to
-    ## the `target > 0` bookkeeping, at any number of replicates.  The
-    ## test below supplies the missing case.
+    ## the power-renormalized resampling is exactly unbiased whether or
+    ## not the normalizing constant C is retained: C is correlated with
+    ## the ancestry, and a test function constant across particles makes
+    ## that correlation vanish.  This test is consequently blind to the
+    ## `target > 0` bookkeeping, at any number of replicates.  The test
+    ## below supplies the missing case.
 
 end
 
@@ -83,10 +85,11 @@ end
     ##
     ## The exact likelihood is Z = E[g₁(X)g₂(X)] = (1/2)(1.8)(1.0) = 0.9.
     ##
-    ## With Np = 2 and target = 1/2, hand calculation gives E[Ẑ] = 0.8875
-    ## when the mass discarded in renormalizing the retained weights to
-    ## unit mean is not credited to the conditional log likelihood, and
-    ## E[Ẑ] = 0.9 when it is.
+    ## Renormalizing the retained weights to unit mean divides them by
+    ## C = (S/Np)·mean_j w_{A_j}^β, the sample mean of the proper
+    ## importance weights, where S = Σᵢ wᵢ^(1-β). With Np = 2 and
+    ## target = 1/2, hand calculation gives E[Ẑ] = 0.8875 when C is
+    ## dropped from the likelihood and E[Ẑ] = 0.9 when it is retained.
 
     Random.seed!(263260083)
 

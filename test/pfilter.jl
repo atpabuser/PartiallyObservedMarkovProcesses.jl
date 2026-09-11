@@ -120,9 +120,10 @@ using BenchmarkTools
     ## S = Σᵢ wᵢ^(1-β), so the properly weighted representation assigns the
     ## particle selected at position j the importance weight
     ## R_j = w_{A_j}/(J·q_{A_j}) = (S/J)·w_{A_j}^β, whose sample mean is
-    ## C = (S/J)·mean_j w_{A_j}^β. Renormalizing the retained weights to
-    ## unit mean stores R_j/C, so C must be returned and credited to the
-    ## conditional log likelihood.
+    ## C = (S/J)·mean_j w_{A_j}^β -- this step's contribution to the
+    ## normalizing constant of the unnormalized measure. Renormalizing the
+    ## retained weights to unit mean stores R_j/C, so C must multiply the
+    ## likelihood accumulator.
     ##
     ## With J = 2 the systematic sweep is driven by a single uniform, so the
     ## ancestry is a piecewise-constant function of it and the expectation

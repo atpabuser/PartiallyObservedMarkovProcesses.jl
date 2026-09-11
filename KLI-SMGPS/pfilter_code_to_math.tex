@@ -69,7 +69,7 @@ terminal ancestry draw used to report a simulated trajectory sampled
 uniformly over terminal particle indices rather than in proportion to their
 weight (Section~\ref{sec:trace}). The third, and the principal subject of
 this document, is that power-tempered resampling discards a normalizing
-constant $C$ whenever $0<\beta<1$: Section~\ref{sec:credit} derives $C$
+constant $C$ whenever $0<\beta<1$: Section~\ref{sec:normconst} derives $C$
 exactly, from the same importance-sampling argument used for the other two
 defects, shows by an exact two-particle calculation that dropping it biases
 the running log likelihood low by $\Theta(1/n)$ per resampling step, and
@@ -285,7 +285,7 @@ probabilities — a single sorted sweep rather than $J$ independent draws.
 \texttt{p[j]} on exit is the array $\xi^{1:J} = (p_1,\dots,p_J)$ of selected
 ancestor indices; \texttt{stot} (line 481) holds $S'$ itself, carried
 forward for use in the normalizing constant computed at the end of the
-routine (Section~\ref{sec:credit}).
+routine (Section~\ref{sec:normconst}).
 
 \paragraph{Ancestor-indexed retained weight (lines 482--484).} This is the
 step at the mathematical heart of the tempered scheme, and the one most easily
@@ -341,7 +341,7 @@ unit mean divides every retained weight — and with it the swarm's total
 mass — by the common factor $m$. Because the sampling measure driving
 selection was $q_j\propto (w^j)^{1-\beta}$ rather than the weights
 themselves, this renormalization removes real likelihood-scale information,
-not merely a bookkeeping convenience: Section~\ref{sec:credit} shows that
+not merely a bookkeeping convenience: Section~\ref{sec:normconst} shows that
 the quantity
 \[
 C = \frac{m\cdot S'}{J}
@@ -356,7 +356,7 @@ $J$) rather than \texttt{nothing}, and the caller
 log likelihood.
 
 \section{The normalizing constant discarded at partial resampling}
-\label{sec:credit}
+\label{sec:normconst}
 
 \subsection{The telescoping identity}
 
@@ -463,11 +463,11 @@ is not a bookkeeping curiosity — $C$ is a piece of the likelihood, on exactly
 the same footing as the mean weight computed at every other observation
 time in \texttt{compute\_ess\_logLik!} (Section~\ref{sec:ess}) — and
 renormalizing $V_k=R_k/C$ to unit mean, as the code does, silently divides
-it out. Proposition~\ref{prop:credit} below records exactly when $C$ is
+it out. Proposition~\ref{prop:normconst} below records exactly when $C$ is
 forced to $1$ and when it is not.
 
 \begin{proposition}
-\label{prop:credit}
+\label{prop:normconst}
 Suppose the incoming weight vector $w^{1:J}$ has unit mean,
 $\frac1J\sum_j w^j = 1$ (as guaranteed by \texttt{compute\_ess\_logLik!},
 Section~\ref{sec:ess}, on entry to resampling). Let $S' = \sum_j
@@ -518,7 +518,7 @@ draw: $C$ is a genuine random variable with mean $1$, not the constant $1$.
 
 \begin{corollary}
 \label{cor:extremes}
-$C$ of Proposition~\ref{prop:credit} is identically $1$ whenever the filter
+$C$ of Proposition~\ref{prop:normconst} is identically $1$ whenever the filter
 is run at its classical default ($\beta=$~\texttt{target}~$=0$) or at the
 fully weighted extreme ($\beta=1$); at those two settings, restoring $C$ or
 dropping it makes no difference of any kind, to any realization —
@@ -548,7 +548,7 @@ relative to whatever baseline the carried weights land on. Aaron King's R
 implementation and, until now, both Julia translations compute, and always
 have computed, the same estimator, and it is biased.
 
-Proposition~\ref{prop:credit}(c) shows $\E[C\mid w^{1:J}]=1$ for every
+Proposition~\ref{prop:normconst}(c) shows $\E[C\mid w^{1:J}]=1$ for every
 $\beta$. It is tempting to conclude from this alone that dropping $C$ costs
 only variance: a factor with conditional expectation one, multiplied into
 an otherwise-unbiased estimator, cannot change that estimator's expectation
@@ -567,12 +567,12 @@ correlated with everything those particles subsequently produce. Dropping
 $C$ therefore biases the likelihood estimate, by $\Theta(1/J)$ per
 resampling step at $0<\beta<1$; Corollary~\ref{cor:extremes} already
 confines the effect to that range, since $C\equiv1$ pins the bias to
-exactly zero at $\beta\in\{0,1\}$. Section~\ref{sec:numerical-credit} makes
+exactly zero at $\beta\in\{0,1\}$. Section~\ref{sec:exact-case} makes
 this concrete with an exact calculation small enough to enumerate by hand,
 and then with an end-to-end filtering test.
 
 \subsection{An exact enumeration, and an end-to-end test}
-\label{sec:numerical-credit}
+\label{sec:exact-case}
 
 \paragraph{A two-particle enumeration.} Take $J=2$ particles with unit-mean
 weights $w=(1.8,0.2)$ and $\beta=1/2$. Then $S'=\sqrt{1.8}+\sqrt{0.2}\approx
@@ -611,7 +611,7 @@ $\E[\hat Z]\approx0.8879$ over $200{,}000$ replicates, a discrepancy of
 about $27$ Monte Carlo standard errors from the exact $Z=0.9$; restoring $C$
 removes the discrepancy. The same test reports the gap shrinking as $J$
 grows, consistent with the $\Theta(1/J)$ scaling of
-Proposition~\ref{prop:credit}(c).
+Proposition~\ref{prop:normconst}(c).
 
 \subsection{The code}
 
@@ -726,7 +726,7 @@ $ss=\sum_j \exp(\log\tilde w^j)^2$, with the comment on line 390 flagging
 explicitly that the formula $\log\widehat{\mathcal L}_n = \ell_{\max}+\log(s/J)$
 is valid here \emph{only because} the carried weight entered with unit mean —
 the same telescoping-identity fact derived in
-Section~\ref{sec:credit}. On exit, \texttt{w} is renormalized to unit mean
+Section~\ref{sec:normconst}. On exit, \texttt{w} is renormalized to unit mean
 (line 395) and \texttt{logw} is renormalized to zero mean on the log-linear
 scale (line 394), so that whichever code path runs next (resampling or not)
 sees a canonically scaled representation.
@@ -838,7 +838,7 @@ $\ESS_n\le\texttt{trigger}\cdot J$ is met — otherwise the entire weighted
 particle representation is carried forward untouched (lines 319--321), with
 \texttt{logLik[]} left at the value set by \texttt{compute\_ess\_logLik!}
 alone. When resampling does occur, it is tempered resampling at the supplied
-$\beta=$~\texttt{target} (line 315); as Section~\ref{sec:credit} works out
+$\beta=$~\texttt{target} (line 315); as Section~\ref{sec:normconst} works out
 in detail, \texttt{logLik[]} \emph{is} updated by this call — the
 normalizing constant $C$ that the resampling routine's own unit-mean
 renormalization would otherwise remove is computed inside
@@ -851,7 +851,7 @@ Comparing the two methods: setting \texttt{trigger}~$=1$ and
 \texttt{target}~$=0$ in the general path reduces it, step for step, to the
 classic path — $\ESS_n\le 1\cdot J$ always holds, so resampling always
 triggers, and $\beta=0$ tempered resampling coincides with classical
-resampling exactly, $C$ of Proposition~\ref{prop:credit}(a) being
+resampling exactly, $C$ of Proposition~\ref{prop:normconst}(a) being
 identically one at $\beta=0$, so no discrepancy of any kind arises between
 the two paths at this setting. The classic method is retained separately in
 the code as a specialized, slightly cheaper implementation of this special
@@ -1123,15 +1123,15 @@ the three particle counts, must be small relative to
 \texttt{tol\_spread}~$=6\times$ the largest (noisiest, smallest-$J$) standard
 error. This test is run only at the classic default settings
 (\texttt{trigger}~$=1$, \texttt{target}~$=0$), where
-Proposition~\ref{prop:credit}(a) already guarantees that the resampling
-bookkeeping question examined in Section~\ref{sec:credit} — whether the
+Proposition~\ref{prop:normconst}(a) already guarantees that the resampling
+bookkeeping question examined in Section~\ref{sec:normconst} — whether the
 normalizing constant $C$ is restored at resampling, or dropped — cannot
 make any difference: $C$ is identically one at $\beta=0$. This check
 therefore neither tests, nor could have tested, that question one way or
-the other; Section~\ref{sec:credit} settles it instead with an exact
+the other; Section~\ref{sec:normconst} settles it instead with an exact
 two-particle enumeration and an end-to-end filtering test built specifically
 around a latent process with memory, at intermediate $\beta$
-(Section~\ref{sec:numerical-credit}), since the present check's model —
+(Section~\ref{sec:exact-case}), since the present check's model —
 smooth and well-mixing on the log scale — is close enough to the memoryless
 case that it could not have detected the bias even had this check been run
 at $\beta\in(0,1)$.
@@ -1147,7 +1147,7 @@ but wrong in value.
 \section{History: a normalizing constant lost, retracted, and reinstated}
 \label{sec:history}
 
-This document did not arrive at Section~\ref{sec:credit} in one pass. The
+This document did not arrive at Section~\ref{sec:normconst} in one pass. The
 account there was derived, implemented, then \emph{withdrawn} on the
 strength of a numerical check, and then reinstated when that check was
 found to have had no power. The false step is recorded here because what
@@ -1167,7 +1167,7 @@ the terminal ancestry draw: a uniform draw over terminal particle indices
 where those particles are not, in general, equally weighted. That one
 remains uncorrected upstream.
 
-The third is the subject of Section~\ref{sec:credit}: the normalizing
+The third is the subject of Section~\ref{sec:normconst}: the normalizing
 constant $C=mS'/J$ that unit-mean renormalization removes at every
 tempered resampling step. It was derived, the one-line change was made ---
 \texttt{systematic\_resample!} altered to return $\log C$ in place of
@@ -1181,7 +1181,7 @@ The argument for removing $C$ ran as follows. Proper weighting is a
 \emph{sufficient} condition for an unbiased sequential Monte Carlo
 likelihood estimator, not a necessary one, so the failure of that
 condition does not by itself establish bias; and
-Proposition~\ref{prop:credit}(c) gives $\E[C\mid w^{1:J}]=1$ exactly, so
+Proposition~\ref{prop:normconst}(c) gives $\E[C\mid w^{1:J}]=1$ exactly, so
 $C$ looks like a mean-one factor that a subsequent renormalization will
 absorb at no cost but variance. A paired numerical comparison seemed to
 confirm it: on the Gompertz--Kalman reduction of
@@ -1199,7 +1199,7 @@ $\E[C\ell]=\E[\ell]$, because $C$ is a function of the selected ancestors
 and is therefore correlated with everything those ancestors go on to
 generate. A conditionally mean-one factor is harmless only if it is also
 \emph{independent} of everything downstream, and this one is not. In the
-two-particle case of Section~\ref{sec:numerical-credit}, $\E[C]=1$
+two-particle case of Section~\ref{sec:exact-case}, $\E[C]=1$
 exactly while $\operatorname{Cov}(C,\ell)=+0.025$, and
 $0.875+0.025=0.9$ accounts for the entire discrepancy.
 
@@ -1248,7 +1248,7 @@ any implementation; the model it was evaluated on simply could not
 exhibit the effect at a resolvable magnitude.
 
 What settled the question was none of these, but the exact enumeration of
-Section~\ref{sec:numerical-credit}: at $J=2$ the systematic sweep is
+Section~\ref{sec:exact-case}: at $J=2$ the systematic sweep is
 driven by a single uniform, so the ancestry is a piecewise-constant
 function of it and the expectation is a finite sum with no Monte Carlo
 tolerance at all. The end-to-end test that accompanies it was then built
