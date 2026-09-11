@@ -23,8 +23,9 @@ struct Mif2dPompObject{
     Np::Int
     rw_sd::NamedTuple
     rw_sd_init::NamedTuple
-    cooling_type::Symbol
-    cooling_fraction_50::W
+    cooling::Function          # the resolved schedule, callable as (m,n,N)
+    cooling_type::Symbol       # `:custom` when `cooling` was user-supplied
+    cooling_fraction_50::W     # `NaN` when `cooling_type === :custom`
     trigger::W
     target::W
     transform::Function
@@ -113,6 +114,71 @@ cooling(
         α^((n-1+(m-1)*N)/(50*N))
     else
         (s+1)/(s+n+(m-1)*N)
+    end
+end
+
+## `SymbolCooling` wraps the two built-in schedules as a callable of
+## `(m,n,N)`, so that `mif2`'s engine sees one uniform interface whether
+## the schedule was named by a `Symbol` or supplied as a function. The
+## setup constant `s` (needed only by the hyperbolic form) is resolved
+## once, at construction, exactly as before.
+struct SymbolCooling{W<:AbstractFloat} <: Function
+    cooling_type::Symbol
+    α::W
+    s::W
+end
+
+(k::SymbolCooling)(m::Integer, n::Integer, N::Integer) =
+    cooling(k.cooling_type,m,n,N,k.α,k.s)
+
+"""
+    geometric_cooling(cooling_fraction_50, N)
+    hyperbolic_cooling(cooling_fraction_50, N)
+
+The two built-in perturbation cooling schedules, as callables of
+`(m,n,N)` returning the factor multiplying every random-walk standard
+deviation at iteration `m` and observation index `n`. Supplied for
+symmetry with a user-written schedule; passing `cooling_type` and
+`cooling_fraction_50` to [`mif2`](@ref) is equivalent.
+"""
+geometric_cooling(α::Real, N::Integer) =
+    SymbolCooling(:geometric,Float64(α),Float64(cooling_setup(:geometric,α,N)))
+
+hyperbolic_cooling(α::Real, N::Integer) =
+    SymbolCooling(:hyperbolic,Float64(α),Float64(cooling_setup(:hyperbolic,α,N)))
+
+## Resolves the `cooling` / `cooling_type` / `cooling_fraction_50`
+## keywords into a single callable schedule, together with the
+## `cooling_type` and `cooling_fraction_50` to be recorded on the
+## returned object. A user-supplied function is recorded as
+## `cooling_type = :custom` with `cooling_fraction_50 = NaN`; that
+## sentinel is never subjected to the `(0,1]` check, since the branch is
+## taken on the type of the specification rather than on the stored
+## value. `:custom` is unreachable from user input, as the `Symbol`
+## branch admits only the two built-in names.
+normalize_cooling(
+    cooling::Union{Symbol,Function,Nothing},
+    cooling_type::Union{Symbol,Nothing},
+    cooling_fraction_50::Real,
+    N::Integer,
+) = begin
+    (cooling === nothing || cooling_type === nothing) ||
+        error("supply either `cooling` or `cooling_type`, not both.")
+    spec = cooling === nothing ?
+        (cooling_type === nothing ? :geometric : cooling_type) : cooling
+    if spec isa Symbol
+        spec ∈ (:geometric,:hyperbolic) ||
+            error("`cooling_type` must be `:geometric` or `:hyperbolic`.")
+        α = Float64(cooling_fraction_50)
+        (0 < α ≤ 1) || error("`cooling_fraction_50` must lie in (0,1].")
+        if spec === :hyperbolic && α < 1
+            α > 1/(50*N) ||
+                error("`cooling_fraction_50` is too small for hyperbolic cooling with "*
+                      "$N observations; it must exceed $(1/(50*N)).")
+        end
+        (SymbolCooling(spec,α,Float64(cooling_setup(spec,α,N))),spec,α)
+    else
+        (spec,:custom,Float64(NaN))
     end
 end
 
@@ -333,8 +399,6 @@ validate_mif2_args(
     inverse_transform::Function,
     rw_sd::NamedTuple,
     rw_sd_init::NamedTuple,
-    cooling_type::Symbol,
-    cooling_fraction_50::Real,
     trigger::Real,
     target::Real,
     Nmif::Integer,
@@ -368,15 +432,8 @@ validate_mif2_args(
             error("parameters to be estimated must be floating-point on the estimation "*
                   "scale; got $(typeof(getproperty(est0,k))) for `$k`.")
     end
-    cooling_type ∈ (:geometric,:hyperbolic) ||
-        error("`cooling_type` must be `:geometric` or `:hyperbolic`.")
-    (0 < cooling_fraction_50 ≤ 1) ||
-        error("`cooling_fraction_50` must lie in (0,1].")
-    if cooling_type === :hyperbolic && cooling_fraction_50 < 1
-        cooling_fraction_50 > 1/(50*N) ||
-            error("`cooling_fraction_50` is too small for hyperbolic cooling with "*
-                  "$N observations; it must exceed $(1/(50*N)).")
-    end
+    ## The cooling specification is validated in `normalize_cooling`,
+    ## which is where the three keywords are reconciled.
     (0 ≤ trigger ≤ 1) || error("`trigger` must lie in [0,1].")
     (0 ≤ target ≤ 1) || error("`target` must lie in [0,1].")
     Nmif ≥ 0 || error("`Nmif` must be a nonnegative integer.")
@@ -397,6 +454,7 @@ mif2_run(
     Np::Integer,
     rw_sd::NamedTuple,
     rw_sd_init::NamedTuple,
+    schedule::Function,
     cooling_type::Symbol,
     cooling_fraction_50::Real,
     transform::Function,
@@ -413,8 +471,20 @@ mif2_run(
     trig = LogLik(trigger)
     targ = LogLik(target)
     α = Float64(cooling_fraction_50)
-    s_cool = cooling_setup(cooling_type,α,N)
     sdschedule = resolve_sdschedule(rw_sd,rw_sd_init,N)
+    ## A user-supplied schedule is checked here rather than in
+    ## `validate_mif2_args`, which does not receive `m0` and so cannot
+    ## evaluate the schedule over the range of iterations actually to be
+    ## run. Monotonicity is deliberately not required: a non-monotone
+    ## schedule is unusual but not incoherent.
+    if Nmif > 0
+        for (mm,nn) ∈ ((m0+1,1),(m0+Nmif,N))
+            c = schedule(mm,nn,N)
+            (c isa Real && isfinite(c) && c ≥ 0) ||
+                error("the `cooling` schedule must return a finite, nonnegative "*
+                      "real number; at (m=$mm, n=$nn, N=$N) it returned $c.")
+        end
+    end
 
     theta = [inverse_transform(est[i]) for i ∈ eachindex(est)]
     Q = eltype(theta)
@@ -427,7 +497,14 @@ mif2_run(
     resamp = fill(false,N)
     chunks,thetabufs = mif_chunks(Np,Q)
 
-    xf = POMP.rinit(object;t0=t0_0,params=theta,nsim=1) # (Np,1); establishes X
+    ## The filtered-state array only needs its element type, which the
+    ## model already carries: `init_state` is declared of the latent
+    ## state type. Calling `rinit` here to discover it -- as this did
+    ## previously -- would draw and immediately discard Np initial
+    ## states, consuming randomness before the loop and so offsetting
+    ## the stream of every continuation relative to an equivalent single
+    ## run. The first `rinit!` below, at n == 1, fills `xf` for real.
+    xf = Array{typeof(init_state(object))}(undef,Np,1)
     xp = similar(xf,1,Np,1)
     ell4 = Array{LogLik}(undef,1,Np,1,1)
     ybuf = Array{eltype(y)}(undef,1,Np,1)
@@ -443,7 +520,7 @@ mif2_run(
         fill!(w,1)
         t0 = t0_0
         for n ∈ 1:N
-            c = cooling(cooling_type,m,n,N,α,s_cool)
+            c = schedule(m,n,N)
             perturb!(est,sdschedule[n],c)
             for i ∈ eachindex(est)
                 @inbounds theta[i] = inverse_transform(est[i])
@@ -503,7 +580,7 @@ mif2_run(
         pomp(object;params=thetafinal),
         m0+Nmif,Np,
         rw_sd,rw_sd_init,
-        cooling_type,α,trig,targ,
+        schedule,cooling_type,α,trig,targ,
         transform,inverse_transform,
         [inverse_transform(e) for e ∈ est],
         est,
@@ -560,6 +637,21 @@ resampled together, using the same ancestry indices.
 - `cooling_type`: `:geometric` or `:hyperbolic`.
 - `cooling_fraction_50`: the fraction by which the random-walk standard
   deviation shrinks after 50 IF2 iterations.
+- `cooling`: an alternative to the two keywords above. Either one of the
+  same two `Symbol`s, or a function of `(m,n,N)` -- the IF2 iteration
+  number, the 1-based observation index, and the number of observation
+  times -- returning the finite, nonnegative factor multiplying every
+  random-walk standard deviation at that point. Supplying both `cooling`
+  and `cooling_type` is an error. A function is evaluated at the two
+  ends of the range of iterations actually to be run and must return a
+  finite, nonnegative real at each; it is *not* required to be
+  monotone. The two built-in schedules are also available in this form
+  as [`geometric_cooling`](@ref) and [`hyperbolic_cooling`](@ref), so
+  that a custom schedule can be written as a modification of one of
+  them. Note that the built-ins advance at per-observation-time
+  granularity, decreasing within an iteration as well as across
+  iterations: the geometric form is `cooling_fraction_50^(s/(50N))` in
+  the global step count `s = n-1+(m-1)N`.
 - `params`: the starting parameter set, on the natural scale, for the
   particle cloud -- either a single `NamedTuple`, replicated `Np` times,
   or an `AbstractVector` of `NamedTuple`s (sharing the same parameter
@@ -602,7 +694,8 @@ mif2(
     rw_sd::NamedTuple,
     rw_sd_init::NamedTuple = (;),
     params::Union{NamedTuple,AbstractVector{<:NamedTuple}} = coef(object),
-    cooling_type::Symbol = :geometric,
+    cooling::Union{Symbol,Function,Nothing} = nothing,
+    cooling_type::Union{Symbol,Nothing} = nothing,
     cooling_fraction_50::Real = 0.5,
     transform::Union{Function,NamedTuple,ParameterTransform} = identity,
     inverse_transform::Union{Function,Nothing} = nothing,
@@ -644,16 +737,17 @@ mif2(
     validate_partrans_names(transform,params0)
     object = pomp(object;params=params_base,rinit,rprocess,logdmeasure,kwargs...)
     N = length(times(object))
+    schedule,ctype,α = normalize_cooling(cooling,cooling_type,cooling_fraction_50,N)
     validate_mif2_args(
         params0,to,from,rw_sd,rw_sd_init,
-        cooling_type,cooling_fraction_50,trigger,target,
+        trigger,target,
         Nmif,Np_,Nmonitor,Np_monitor_,N,
     )
     tr0 = [(;iteration=0,logLik=LogLik(NaN),monitor_logLik=LogLik(NaN),params_base...)]
     mif2_run(
         object,0,est0,tr0,
         Nmif,Np_,rw_sd,rw_sd_init,
-        cooling_type,cooling_fraction_50,
+        schedule,ctype,α,
         to,from,
         trigger,target,Nmonitor,Np_monitor_,
     )
@@ -685,7 +779,14 @@ mif2(
     Np::Integer = object.Np,
     rw_sd::NamedTuple = object.rw_sd,
     rw_sd_init::NamedTuple = object.rw_sd_init,
-    cooling_type::Symbol = object.cooling_type,
+    ## A stored custom schedule is carried forward through `cooling`, and
+    ## `cooling_type` is left at `nothing` so that `normalize_cooling`
+    ## does not see both. For the two built-in schedules the reverse
+    ## holds, so the stored `cooling_fraction_50` still governs.
+    cooling::Union{Symbol,Function,Nothing} =
+        (object.cooling_type === :custom ? object.cooling : nothing),
+    cooling_type::Union{Symbol,Nothing} =
+        (object.cooling_type === :custom ? nothing : object.cooling_type),
     cooling_fraction_50::Real = object.cooling_fraction_50,
     transform::Union{Function,NamedTuple,ParameterTransform,Nothing} = nothing,
     inverse_transform::Union{Function,Nothing} = nothing,
@@ -720,15 +821,16 @@ mif2(
     N = length(times(base))
     params0 = coef(base)
     transform === nothing || validate_partrans_names(transform,params0)
+    schedule,ctype,α = normalize_cooling(cooling,cooling_type,cooling_fraction_50,N)
     validate_mif2_args(
         params0,to,from,rw_sd,rw_sd_init,
-        cooling_type,cooling_fraction_50,trigger,target,
+        trigger,target,
         Nmif,Np,Nmonitor,Np_monitor,N,
     )
     mif2_run(
         base,object.Nmif,est0,copy(object.traces),
         Nmif,Np,rw_sd,rw_sd_init,
-        cooling_type,cooling_fraction_50,
+        schedule,ctype,α,
         to,from,
         trigger,target,Nmonitor,Np_monitor,
     )

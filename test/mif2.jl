@@ -419,3 +419,94 @@ end
     @test h2m.Nmonitor == 2
 
 end
+
+@info h2("pluggable cooling schedule")
+
+@testset verbose=true "mif2 cooling" begin
+
+    rin = function(;x0,_...); (x=rand(Poisson(x0)),); end
+    rlin = function (;t,a,x,_...); (x=rand(Poisson(a*x)),); end
+    rmeas = function (;x,k,_...); (y=rand(NegativeBinomial(k,k/(k+x))),); end
+    logdmeas = function (;x,y,k,_...); logpdf(NegativeBinomial(k,k/(k+x)),y); end
+
+    Random.seed!(263260083)
+    p1 = (a=1.5,k=7.0,x0=5.0)
+    P = simulate(
+        t0=0,times=0:20,params=p1,
+        rinit=rin,rprocess=discrete_time(rlin,dt=1),
+        rmeasure=rmeas,logdmeasure=logdmeas,
+    )[1]
+    N = length(times(P))
+
+    ## --- `cooling` as a Symbol is equivalent to `cooling_type` ---------------
+    Random.seed!(31)
+    a1 = mif2(P; Nmif=2, Np=30, params=p1, rw_sd=(a=0.02,), cooling_type=:geometric)
+    Random.seed!(31)
+    a2 = mif2(P; Nmif=2, Np=30, params=p1, rw_sd=(a=0.02,), cooling=:geometric)
+    @test isequal(traces(a1),traces(a2))
+    @test a2.cooling_type === :geometric
+
+    ## --- a custom schedule reproducing the built-in is bit-identical ---------
+    ## Same arithmetic in the same call order, so this must agree exactly,
+    ## not merely approximately.
+    α = 0.5
+    s_geo = POMP.cooling_setup(:geometric,α,N)
+    mysched = (m,n,NN) -> POMP.cooling(:geometric,m,n,NN,α,s_geo)
+
+    Random.seed!(77)
+    b1 = mif2(P; Nmif=3, Np=30, params=p1, rw_sd=(a=0.02,k=0.02),
+              cooling_type=:geometric, cooling_fraction_50=α)
+    Random.seed!(77)
+    b2 = mif2(P; Nmif=3, Np=30, params=p1, rw_sd=(a=0.02,k=0.02),
+              cooling=mysched)
+    @test isequal(traces(b1),traces(b2))
+    @test isequal(b1.estcloud,b2.estcloud)
+
+    ## a custom schedule is recorded as `:custom`, with no fraction
+    @test b2.cooling_type === :custom
+    @test isnan(b2.cooling_fraction_50)
+    ## the built-in path still records both
+    @test b1.cooling_type === :geometric
+    @test b1.cooling_fraction_50 == α
+
+    ## --- a custom schedule survives continuation ----------------------------
+    ## Continuing must resume the same schedule at m0+1, so a three-iteration
+    ## run and a two-plus-one continuation agree.
+    Random.seed!(77)
+    c1 = mif2(P; Nmif=2, Np=30, params=p1, rw_sd=(a=0.02,k=0.02), cooling=mysched)
+    c2 = mif2(c1; Nmif=1)
+    @test c2.cooling_type === :custom
+    @test c2.Nmif == 3
+    @test isnan(c2.cooling_fraction_50)
+    @test isequal(traces(c2),traces(b2))
+
+    ## --- the exported built-in constructors ---------------------------------
+    Random.seed!(77)
+    d1 = mif2(P; Nmif=3, Np=30, params=p1, rw_sd=(a=0.02,k=0.02),
+              cooling=geometric_cooling(α,N))
+    @test isequal(traces(d1),traces(b1))
+    @test hyperbolic_cooling(α,N)(1,1,N) ≈ 1.0
+    @test hyperbolic_cooling(α,N)(50,N,N) ≈ α rtol=1e-10
+
+    ## --- errors --------------------------------------------------------------
+    @test_throws r"not both" mif2(
+        P;Nmif=1,Np=10,params=p1,rw_sd=(a=0.02,),
+        cooling=:geometric,cooling_type=:geometric
+    )
+    @test_throws r"cooling_type" mif2(
+        P;Nmif=1,Np=10,params=p1,rw_sd=(a=0.02,),cooling=:bogus
+    )
+    ## a schedule returning a non-finite or negative factor is rejected
+    @test_throws r"finite, nonnegative" mif2(
+        P;Nmif=1,Np=10,params=p1,rw_sd=(a=0.02,),cooling=(m,n,NN)->NaN
+    )
+    @test_throws r"finite, nonnegative" mif2(
+        P;Nmif=1,Np=10,params=p1,rw_sd=(a=0.02,),cooling=(m,n,NN)->-1.0
+    )
+
+    ## a non-monotone schedule is unusual but permitted
+    fit_nm = mif2(P; Nmif=2, Np=20, params=p1, rw_sd=(a=0.02,),
+                  cooling=(m,n,NN)->0.5+0.4*sin(n))
+    @test fit_nm isa POMP.Mif2dPompObject
+
+end
