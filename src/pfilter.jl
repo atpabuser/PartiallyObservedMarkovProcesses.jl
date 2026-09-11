@@ -4,7 +4,8 @@ struct PfilterdPompObject{
     T <: Time,
     X <: NamedTuple,
     P <: PompObject{T,X},
-    W <: AbstractFloat
+    W <: AbstractFloat,
+    C <: Union{AbstractVector{<:NamedTuple},Nothing}
     } <: AbstractPompObject
     pompobj::P
     Np::Int
@@ -19,12 +20,31 @@ struct PfilterdPompObject{
     cond_logLik::Array{W,1}
     resampled::Array{Bool,1}
     logLik::W
+    paramcloud::C
 end
 
 pomp(object::PfilterdPompObject) = object.pompobj
 logLik(object::PfilterdPompObject) = object.logLik
 eff_sample_size(object::PfilterdPompObject) = object.eff_sample_size
 cond_logLik(object::PfilterdPompObject) = object.cond_logLik
+
+"""
+    paramcloud(object)
+
+`paramcloud` extracts the final parameter cloud from a
+[`pfilter`](@ref) run that was given one -- the `Np` parameter sets
+carried by the particles at the last observation time, in the order of
+`filt[end,:]`, having been permuted along with the states at every
+resampling step. It is `nothing` when the filter was run with a single
+shared parameter set.
+
+Note that this is a different object from `coef`, which reports the
+parameters of the one ancestral lineage whose trajectory was stored: the
+cloud describes the whole weighted representation at the end, `coef` the
+single sampled path through it. Both are correct answers to different
+questions.
+"""
+paramcloud(object::PfilterdPompObject) = object.paramcloud
 
 """
     resampled(object)
@@ -58,23 +78,75 @@ forward and combined with the next step's, so that `cond_logLik` always
 sums to a valid estimate of the overall log likelihood, regardless of
 when resampling occurs.
 
+`params` may be a single parameter set, shared by every particle, or a
+vector of `Np` of them (sharing the same parameter names), in which case
+each particle carries its own and the cloud is resampled along with the
+states at every resampling step. `Np` then defaults to the length of the
+cloud, and must equal it if given. The final cloud is available through
+[`paramcloud`](@ref); `coef` of the result reports instead the parameter
+set carried by the one ancestral lineage whose trajectory was stored,
+which is the parameter counterpart of `init_state`. With a single
+parameter set, `paramcloud` is `nothing`.
+
 At least the `rinit`, `rprocess`, and `logdmeasure` basic components are
 needed. `kwargs...` can be used to modify or unset additional fields.
 """
 pfilter(
     object::ValidPompData;
-    Np::Integer = 1,
+    Np::Union{Integer,Nothing} = nothing,
     trigger::Real = 1,
     target::Real = 0,
-    params::P = coef(object),
+    params::Union{P,AbstractVector{P}} = coef(object),
     rinit::Union{Function,Nothing,Missing} = missing,
     rprocess::Union{PompPlugin,Nothing,Missing} = missing,
     logdmeasure::Union{Function,Nothing,Missing} = missing,
     kwargs...,
 ) where {P<:NamedTuple} = begin
-    Np ≥ 1 || error("`Np` must be a positive integer.")
     (0 ≤ trigger ≤ 1) || error("`trigger` must lie in [0,1].")
     (0 ≤ target ≤ 1) || error("`target` must lie in [0,1].")
+    ## Keyword types take no part in dispatch, so the two paths are
+    ## selected here and entered through positional helpers, leaving the
+    ## single-parameter-set body untouched.
+    if params isa AbstractVector
+        isempty(params) &&
+            error("`params`, given as a vector of parameter sets, must be nonempty.")
+        ks0 = keys(params[1])
+        all(p -> keys(p)==ks0,params) ||
+            error("all entries of the parameter cloud `params` must share the same "*
+                  "parameter names.")
+        Np_ = if Np === nothing
+            length(params)
+        else
+            Np == length(params) ||
+                error("`Np` must equal `length(params)` when `params` is a vector of "*
+                      "parameter sets (got Np=$Np, length(params)=$(length(params))).")
+            Np
+        end
+        _pfilter_cloud(
+            object,collect(params),Np_,LogLik(trigger),LogLik(target);
+            rinit,rprocess,logdmeasure,kwargs...,
+        )
+    else
+        Np_ = Np === nothing ? 1 : Np
+        Np_ ≥ 1 || error("`Np` must be a positive integer.")
+        _pfilter_scalar(
+            object,params,Np_,LogLik(trigger),LogLik(target);
+            rinit,rprocess,logdmeasure,kwargs...,
+        )
+    end
+end
+
+_pfilter_scalar(
+    object::ValidPompData,
+    params::NamedTuple,
+    Np::Integer,
+    trig::LogLik,
+    targ::LogLik;
+    rinit::Union{Function,Nothing,Missing} = missing,
+    rprocess::Union{PompPlugin,Nothing,Missing} = missing,
+    logdmeasure::Union{Function,Nothing,Missing} = missing,
+    kwargs...,
+) = begin
     object = pomp(
         object;
         params,rinit,rprocess,logdmeasure,
@@ -84,8 +156,6 @@ pfilter(
     t = times(object)
     y = obs(object)
     N = length(t)
-    trig = LogLik(trigger)
-    targ = LogLik(target)
     x0 = POMP.rinit(object;t0,nsim=Np)
     xf = similar(x0,N,Np)
     xp = similar(x0,N,Np)
@@ -140,7 +210,109 @@ pfilter(
         eff_sample_size,
         cond_logLik,
         resamp,
-        sum(cond_logLik)
+        sum(cond_logLik),
+        nothing,
+    )
+end
+
+## The cloud path: each particle carries its own parameter set. The
+## particles live on the *parameter* axis rather than the nsim axis,
+## since that is the axis along which the workhorses broadcast
+## parameters, so the arrays here are the transpose of those above and
+## the loop is a separate pair of methods. The scalar path is left alone
+## deliberately: it needs no observation replication and parallelizes
+## over nsim, and is the hot path.
+_pfilter_cloud(
+    object::ValidPompData,
+    params::AbstractVector{P},
+    Np::Integer,
+    trig::LogLik,
+    targ::LogLik;
+    rinit::Union{Function,Nothing,Missing} = missing,
+    rprocess::Union{PompPlugin,Nothing,Missing} = missing,
+    logdmeasure::Union{Function,Nothing,Missing} = missing,
+    kwargs...,
+) where {P<:NamedTuple} = begin
+    ## The model carries a single parameter set; the cloud is supplied to
+    ## the workhorses directly. The base set is the first entry, which is
+    ## what `coef` of the *model* will report and what determines the
+    ## latent state type.
+    object = pomp(
+        object;
+        params=params[1],rinit,rprocess,logdmeasure,
+        kwargs...,
+    )
+    t0 = timezero(object)
+    t = times(object)
+    y = obs(object)
+    N = length(t)
+    theta = collect(params)
+    Q = eltype(theta)
+    x0 = POMP.rinit(object;t0,params=theta,nsim=1)   # (Np,1)
+    xf = similar(x0,N,Np)
+    xp = similar(x0,N,Np)
+    xt = similar(x0,N)
+    w = similar(Array{LogLik},N,Np)
+    cond_logLik = similar(w,N)
+    eff_sample_size = similar(w,N)
+    resamp = similar(Array{Bool},N)
+    perm = similar(Array{Int},N,Np)
+    thetabuf = similar(theta)
+    chunks,thetabufs = chunk_params(Np,Q)
+    ## the scalar observation, broadcast along the parameter axis, as
+    ## `logdmeasure!` requires one observation per parameter set
+    ybuf = Array{eltype(y)}(undef,1,Np,1)
+    if trig == 1 && targ == 0
+        work = similar(Array{LogLik},Np)
+        theta = pfilter_internal!(
+            object,
+            x0,
+            reshape(xf,N,Np,1),
+            reshape(xp,N,Np,1),
+            reshape(w,N,Np,1,1),
+            t0,t,y,ybuf,
+            theta,thetabuf,chunks,thetabufs,
+            work,
+            eff_sample_size,
+            cond_logLik,
+            resamp,
+            perm,
+        )
+        i = trace_ancestry!(xt,xf,perm)
+        logweights = zeros(LogLik,Np)
+    else
+        wcarry = ones(LogLik,Np)
+        work = similar(wcarry)
+        theta = pfilter_internal!(
+            object,
+            x0,
+            reshape(xf,N,Np,1),
+            reshape(xp,N,Np,1),
+            reshape(w,N,Np,1,1),
+            t0,t,y,ybuf,
+            theta,thetabuf,chunks,thetabufs,
+            wcarry,work,
+            eff_sample_size,
+            cond_logLik,
+            resamp,
+            perm,
+            trig,targ,
+        )
+        i = trace_ancestry!(xt,xf,perm,wcarry,work)
+        logweights = log.(wcarry)
+    end
+    ## `trace_ancestry!` returns the time-zero ancestor of the stored
+    ## lineage, so `params[i]` is the parameter set that lineage carried
+    ## and `x0[i]` the state it started from. That is a different object
+    ## from `paramcloud`, which is the whole final cloud.
+    PfilterdPompObject(
+        PompObject(object,init_state=x0[i],states=xt,params=params[i]),
+        Np,trig,targ,vec(x0),xf,xp,w,logweights,
+        eff_sample_size,
+        cond_logLik,
+        resamp,
+        sum(cond_logLik),
+        theta,
     )
 end
 
@@ -264,6 +436,174 @@ advance_particles!(
         logdmeasure!(object, @view(w[:,:,[j],:]); times=t, y, x=@view(xp[:,:,[j]]))
     end
     nothing
+end
+
+## The cloud engines. These mirror the two above, with three differences
+## and no others: the slices address the parameter axis rather than the
+## nsim axis, the observation is broadcast along that axis into `ybuf`,
+## and the parameter cloud is permuted by the same ancestry as the
+## states. The loop is duplicated rather than abstracted over a layout
+## trait so that the scalar path stays provably untouched.
+##
+## The permutation swaps two local bindings, which a callee cannot do, so
+## the final cloud is returned.
+pfilter_internal!(
+    object::AbstractPompObject,
+    x0::AbstractArray{X,2},
+    xf::AbstractArray{X,3},
+    xp::AbstractArray{X,3},
+    w::AbstractArray{LogLik,4},
+    t0::T,
+    t::AbstractArray{T,1},
+    y::AbstractArray{Y,1},
+    ybuf::AbstractArray{Y,3},
+    theta::AbstractVector{Q},
+    thetabuf::AbstractVector{Q},
+    chunks::AbstractVector{<:AbstractRange},
+    thetabufs::AbstractVector{<:AbstractVector{Q}},
+    work::AbstractArray{W,1},
+    eff_sample_size::AbstractArray{W,1},
+    cond_logLik::AbstractArray{W,1},
+    resamp::AbstractArray{Bool,1},
+    perm::AbstractArray{I,2},
+) where {W<:AbstractFloat,T<:Time,X<:NamedTuple,Y<:NamedTuple,Q<:NamedTuple,I<:Integer} = begin
+    for k ∈ eachindex(t)
+        fill!(ybuf,y[k])
+        advance_particles_cloud!(
+            object,
+            t0,x0,
+            @view(xp[[k],:,:]),
+            @view(w[[k],:,:,:]),
+            @view(t[[k]]),
+            ybuf,
+            theta,chunks,thetabufs,
+        )
+        pfilt_step_comps!(
+            @view(cond_logLik[k]),
+            @view(eff_sample_size[k]),
+            @view(w[k,:,1,1]),
+            @view(perm[k,:]),
+            @view(xp[k,:,1]),
+            @view(xf[k,:,1]),
+            work,
+            @view(resamp[k]),
+        )
+        if resamp[k]
+            @inbounds for j ∈ eachindex(theta)
+                thetabuf[j] = theta[perm[k,j]]
+            end
+            theta,thetabuf = thetabuf,theta
+        end
+        t0 = t[k]
+        x0 = view(xf,k,:,:)
+    end
+    theta
+end
+
+pfilter_internal!(
+    object::AbstractPompObject,
+    x0::AbstractArray{X,2},
+    xf::AbstractArray{X,3},
+    xp::AbstractArray{X,3},
+    w::AbstractArray{LogLik,4},
+    t0::T,
+    t::AbstractArray{T,1},
+    y::AbstractArray{Y,1},
+    ybuf::AbstractArray{Y,3},
+    theta::AbstractVector{Q},
+    thetabuf::AbstractVector{Q},
+    chunks::AbstractVector{<:AbstractRange},
+    thetabufs::AbstractVector{<:AbstractVector{Q}},
+    wcarry::AbstractArray{W,1},
+    work::AbstractArray{W,1},
+    eff_sample_size::AbstractArray{W,1},
+    cond_logLik::AbstractArray{W,1},
+    resamp::AbstractArray{Bool,1},
+    perm::AbstractArray{I,2},
+    trigger::W,
+    target::W,
+) where {W<:AbstractFloat,T<:Time,X<:NamedTuple,Y<:NamedTuple,Q<:NamedTuple,I<:Integer} = begin
+    for k ∈ eachindex(t)
+        fill!(ybuf,y[k])
+        advance_particles_cloud!(
+            object,
+            t0,x0,
+            @view(xp[[k],:,:]),
+            @view(w[[k],:,:,:]),
+            @view(t[[k]]),
+            ybuf,
+            theta,chunks,thetabufs,
+        )
+        pfilt_step_comps!(
+            @view(cond_logLik[k]),
+            @view(eff_sample_size[k]),
+            @view(w[k,:,1,1]),
+            @view(perm[k,:]),
+            @view(xp[k,:,1]),
+            @view(xf[k,:,1]),
+            wcarry,work,
+            trigger,target,
+            @view(resamp[k]),
+        )
+        if resamp[k]
+            @inbounds for j ∈ eachindex(theta)
+                thetabuf[j] = theta[perm[k,j]]
+            end
+            theta,thetabuf = thetabuf,theta
+        end
+        t0 = t[k]
+        x0 = view(xf,k,:,:)
+    end
+    theta
+end
+
+## The per-particle-parameter advance, used whenever each particle
+## carries its own parameter vector: by `mif2`, whose cloud is perturbed
+## afresh at every observation time, and by `pfilter` when it is handed a
+## cloud rather than a single parameter set.
+##
+## `advance_particles!` above parallelizes over the *nsim* axis, which
+## has length one in this layout -- here the Np particles live on the
+## *parameter* axis, since that is the axis the workhorses broadcast
+## parameters along. So this routine chunks and parallelizes over that
+## axis instead. The two layouts are transposes of one another, which is
+## why there are two routines rather than one; `pfilt_step_comps!` is
+## indifferent, seeing only one-dimensional slices either way.
+advance_particles_cloud!(
+    object::AbstractPompObject,
+    t0::T,
+    x0::AbstractArray{X,2},
+    xp::AbstractArray{X,3},
+    w::AbstractArray{W,4},
+    t::AbstractArray{T,1},
+    y::AbstractArray{Y,3},
+    theta::AbstractVector{Q},
+    chunks::AbstractVector{<:AbstractRange},
+    thetabufs::AbstractVector{<:AbstractVector{Q}},
+) where {W<:AbstractFloat,T<:Time,X<:NamedTuple,Y<:NamedTuple,Q<:NamedTuple} = begin
+    flexmap!(eachindex(chunks)) do c
+        jj = chunks[c]
+        buf = thetabufs[c]
+        for (b,j) ∈ enumerate(jj)
+            @inbounds buf[b] = theta[j]
+        end
+        ## A chunk's parameters are materialized into a plain `Vector`
+        ## rather than passed as a view. `val_array` now admits an
+        ## `AbstractVector`, so a view would be correct; the buffer is
+        ## kept because it is preallocated once per chunk and so avoids
+        ## Np*N transient allocations over a run.
+        rprocess!(object, @view(xp[:,jj,:]); x0=@view(x0[jj,:]), t0, times=t, params=buf)
+        logdmeasure!(object, @view(w[:,jj,:,:]); times=t, y=@view(y[:,jj,:]), x=@view(xp[:,jj,:]), params=buf)
+    end
+    nothing
+end
+
+chunk_params(Np::Integer, Q::Type) = begin
+    nchunks = max(1,min(Np,Threads.nthreads()))
+    bounds = round.(Int,range(0,Np,length=nchunks+1))
+    chunks = [(bounds[c]+1):bounds[c+1] for c ∈ 1:nchunks if bounds[c+1] > bounds[c]]
+    thetabufs = [Vector{Q}(undef,length(jj)) for jj ∈ chunks]
+    (chunks,thetabufs)
 end
 
 ## classic step: resample to equal weights whenever the maximum log

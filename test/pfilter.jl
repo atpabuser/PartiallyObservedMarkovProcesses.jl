@@ -194,4 +194,62 @@ using BenchmarkTools
         @test exp(lc) ≈ (p==[1,1] ? 1.2 : 0.8) atol=1e-10
     end
 
+    ## --- a parameter cloud, one set per particle ----------------------------
+
+    ## A degenerate cloud -- every particle given the same parameters -- must
+    ## reproduce the ordinary filter. The two paths use transposed array
+    ## layouts and different parallel granularity, so they are not promised
+    ## to consume the same random draws; the comparison is statistical.
+    Random.seed!(20260909)
+    reps_s = [logLik(pfilter(P,Np=200,params=p1)) for _ ∈ 1:30]
+    reps_c = [logLik(pfilter(P,Np=200,params=fill(p1,200))) for _ ∈ 1:30]
+    ls = logmeanexp(reps_s,se=true)
+    lc = logmeanexp(reps_c,se=true)
+    @test abs(ls.est-lc.est) < 4*sqrt(ls.se^2+lc.se^2)
+
+    ## the cloud is carried and returned, permuted along with the states
+    Qc = pfilter(P,Np=100,params=fill(p1,100))
+    @test length(paramcloud(Qc))==100
+    @test all(q -> keys(q)==keys(p1),paramcloud(Qc))
+    @test Qc.Np==100
+
+    ## `coef` reports the parameters of the one stored ancestral lineage,
+    ## which is a different object from the whole final cloud
+    @test coef(Qc) ∈ fill(p1,100)
+
+    ## no cloud is recorded when a single parameter set was supplied
+    @test paramcloud(pfilter(P,Np=10,params=p1)) === nothing
+
+    ## a non-degenerate cloud runs, and the weighted paths accept one too
+    Random.seed!(606)
+    cloud = [merge(p1,(a=p1.a*exp(0.05*randn()),)) for _ ∈ 1:80]
+    Qn = pfilter(P,Np=80,params=cloud)
+    @test isfinite(logLik(Qn))
+    @test length(paramcloud(Qn))==80
+    @test coef(Qn) ∈ cloud
+    for (trg,tgt) ∈ ((0.5,0.0),(1.0,0.4),(0.5,0.4))
+        Qw = pfilter(P,Np=60,params=cloud[1:60],trigger=trg,target=tgt)
+        @test isfinite(logLik(Qw))
+        @test length(paramcloud(Qw))==60
+    end
+
+    ## `Np` may be omitted, and must agree when given
+    @test pfilter(P,params=fill(p1,25)).Np==25
+    @test_throws r"must equal" pfilter(P,Np=24,params=fill(p1,25))
+
+    ## the cloud must be nonempty and internally consistent
+    @test_throws r"nonempty" pfilter(P,params=typeof(p1)[])
+    @test_throws r"same parameter names" pfilter(
+        P,params=[p1,(r=1.0,K=2.0)]
+    )
+
+    ## `wpfilter` forwards to the same path
+    Qwp = wpfilter(P,Np=40,params=fill(p1,40),trigger=0.5)
+    @test isfinite(logLik(Qwp))
+    @test length(paramcloud(Qwp))==40
+
+    ## melt is unaffected by the presence of a cloud
+    dc = melt(Qc)
+    @test propertynames(dc)==[:time,:y,:x,:ess,:cond_logLik,:resampled]
+
 end

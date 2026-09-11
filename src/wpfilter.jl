@@ -6,7 +6,9 @@
 occurs at an observation time only when the effective sample size there
 falls to `trigger*Np` or below, and upon resampling the weights are
 renormalized to the power `target`. It is equivalent to calling
-[`pfilter`](@ref) with the same arguments.
+[`pfilter`](@ref) with the same arguments, and accepts everything
+`pfilter` does -- including a vector of `Np` parameter sets, one per
+particle.
 
 At least the `rinit`, `rprocess`, and `logdmeasure` basic components are
 needed. `kwargs...` can be used to modify or unset additional fields.

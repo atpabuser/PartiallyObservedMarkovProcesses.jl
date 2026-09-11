@@ -378,48 +378,6 @@ end
 
 ## -------------------------------------------------------- particle advance
 
-## `advance_particles!` (in pfilter.jl) parallelizes over the *nsim* axis
-## (axis 2), which has length 1 in mif2's layout (Np parameter-particles
-## live on axis 1). This routine instead chunks and parallelizes over the
-## parameter axis, and materializes each chunk's parameters into a plain
-## `Vector` (never a view/SubArray -- see the caution below).
-advance_particles_mif!(
-    object::AbstractPompObject,
-    t0::T,
-    x0::AbstractArray{X,2},
-    xp::AbstractArray{X,3},
-    w::AbstractArray{W,4},
-    t::AbstractArray{T,1},
-    y::AbstractArray{Y,3},
-    theta::AbstractVector{Q},
-    chunks::AbstractVector{<:AbstractRange},
-    thetabufs::AbstractVector{<:AbstractVector{Q}},
-) where {W<:AbstractFloat,T<:Time,X<:NamedTuple,Y<:NamedTuple,Q<:NamedTuple} = begin
-    flexmap!(eachindex(chunks)) do c
-        jj = chunks[c]
-        buf = thetabufs[c]
-        for (b,j) ∈ enumerate(jj)
-            @inbounds buf[b] = theta[j]
-        end
-        ## NB: `params` must be a genuine `Vector`, never a view: `rprocess!`/
-        ## `logdmeasure!` call `val_array(params)`, and a `SubArray` falls
-        ## through to `val_array`'s scalar-wrapping fallback, silently
-        ## wrapping the whole view as a single "parameter set" and then
-        ## failing the length assertions inside those functions.
-        rprocess!(object, @view(xp[:,jj,:]); x0=@view(x0[jj,:]), t0, times=t, params=buf)
-        logdmeasure!(object, @view(w[:,jj,:,:]); times=t, y=@view(y[:,jj,:]), x=@view(xp[:,jj,:]), params=buf)
-    end
-    nothing
-end
-
-mif_chunks(Np::Integer, Q::Type) = begin
-    nchunks = max(1,min(Np,Threads.nthreads()))
-    bounds = round.(Int,range(0,Np,length=nchunks+1))
-    chunks = [(bounds[c]+1):bounds[c+1] for c ∈ 1:nchunks if bounds[c+1] > bounds[c]]
-    thetabufs = [Vector{Q}(undef,length(jj)) for jj ∈ chunks]
-    (chunks,thetabufs)
-end
-
 ## ---------------------------------------------------------- transform
 
 ## Normalizes the three accepted forms of `mif2`'s `transform` argument
@@ -583,7 +541,7 @@ mif2_run(
     cll = fill(LogLik(NaN),N)
     ess = fill(LogLik(NaN),N)
     resamp = fill(false,N)
-    chunks,thetabufs = mif_chunks(Np,Q)
+    chunks,thetabufs = chunk_params(Np,Q)
 
     ## The filtered-state array only needs its element type, which the
     ## model already carries: `init_state` is declared of the latent
@@ -618,7 +576,7 @@ mif2_run(
                 rinit!(object,xf;t0,params=theta)
             end
             fill!(ybuf,y[n])
-            advance_particles_mif!(
+            advance_particles_cloud!(
                 object,t0,xf,xp,ell4,
                 @view(t[[n]]),ybuf,theta,chunks,thetabufs,
             )
