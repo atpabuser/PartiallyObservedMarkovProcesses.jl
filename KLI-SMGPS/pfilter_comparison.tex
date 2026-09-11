@@ -62,19 +62,29 @@ Both repositories implement the same generalized sequential Monte Carlo
 resampling is triggered by a threshold on the effective sample size, and,
 when it occurs, is tempered by a power $\beta$ that interpolates between
 equally weighted resampling and an untouched weighted particle
-representation. This note documents four places where Aaron King's Julia
-translation (\texttt{PartiallyObservedMarkovProcesses.jl\_aarons/src/pfilter.jl})
-and Debsurya's Julia translation
-(\texttt{PartiallyObservedMarkovProcesses.jl/src/pfilter.jl}) diverge, despite
-sharing the same trigger/target interface and the same recursive structure:
-an indexing error in how retained weights are carried through resampling, an
-unweighted terminal ancestry draw, and the presence or absence of a per-step
-resampling diagnostic. It also records, at length, a fourth apparent
-divergence --- a supposed missing normalizing-constant credit at partial
-resampling --- which on numerical examination turned out not to be a defect
-at all, and which has since been reverted; the argument that dismissed it is
-of more interest than the other three findings combined. It closes with the
-resulting unification of \texttt{wpfilter} as a thin wrapper around
+representation. This note compares Aaron King's Julia translation
+(\texttt{PartiallyObservedMarkovProcesses.jl\_aarons/src/pfilter.jl}, at
+commit \texttt{1610d34}) against Debsurya's Julia translation
+(\texttt{PartiallyObservedMarkovProcesses.jl/src/pfilter.jl}), which share
+the same trigger/target interface and the same recursive structure. The
+principal finding is that power-tempered resampling discards a normalizing
+constant $C$ whenever $0<\beta<1$: dropping it, as Aaron's Julia translation
+and the R \texttt{pomp} package's \texttt{wpfilter.c} both do, biases the
+running log likelihood low by $\Theta(1/n)$ per resampling step, a claim
+established here by an exact two-particle calculation and confirmed by an
+end-to-end test built specifically to be sensitive to it; Debsurya's
+translation restores $C$. The note also documents an indexing error, present
+in the compared Aaron King Julia translation, that assigned the retained
+weight by resampling slot rather than by selected ancestor. Aaron King has
+since fixed this himself, independently, in commit \texttt{1d8dbc0}, in a
+form equivalent to Debsurya's, so it is recorded here as a resolved
+historical point --- and the comparison against it explicitly as a
+comparison against the pre-\texttt{1d8dbc0} code --- rather than as a live
+divergence. Two further, still-live differences are documented: an unequally
+weighted terminal ancestry draw, which Aaron's code initiates uniformly
+rather than proportional to the terminal weights, and the presence, in
+Debsurya's translation only, of a per-step resampling diagnostic. It closes
+with the resulting unification of \texttt{wpfilter} as a thin wrapper around
 \texttt{pfilter}.
 \end{abstract}
 
@@ -109,8 +119,14 @@ full weighted particle representation forward essentially unchanged. Both
 repositories implement this design; the divergences below concern its
 realization in code, not the design itself.
 
-\section{A positional-indexing error in weight retention}
+\section{A positional-indexing error in weight retention, since fixed upstream}
 \label{sec:positional}
+
+This section compares against Aaron's Julia translation as it stood at
+commit \texttt{1610d34}, the version installed locally when this comparison
+was prepared; it is not a live difference between the two repositories
+today; see the note at the end of the section. The underlying reasoning is
+kept because it is used again, unchanged, in \S\ref{sec:normconst} below.
 
 Once ancestor indices $p(1),\dots,p(n)$ have been drawn from the cumulative
 sums of $w_j^{1-\beta}$, the retained weight $w_j^\beta$ must travel
@@ -172,10 +188,10 @@ weight is indexed by the ancestor, not by position:
 wt[k] = ws[sp];    /* ws = carried weights, sp = selected ancestor index */
 \end{lstlisting}
 
-Debsurya's Julia translation follows the R form rather than Aaron's Julia
-form:
+Debsurya's Julia translation takes the ancestor-indexed form, following the
+R form rather than the positional form above:
 
-\begin{lstlisting}[language=Julia, caption={Debsurya's \texttt{systematic\_resample!} (PartiallyObservedMarkovProcesses.jl/src/pfilter.jl, lines 448--481), retained-weight step}]
+\begin{lstlisting}[language=Julia, caption={Debsurya's \texttt{systematic\_resample!} (PartiallyObservedMarkovProcesses.jl/src/pfilter.jl, lines 457--491), retained-weight step}]
 @inbounds for j in eachindex(p)
     ucum[j] = w[p[j]]^beta     # retained weight of the selected ancestor
 end
@@ -191,124 +207,149 @@ Here \texttt{w[p[j]]} is evaluated \emph{before} \texttt{w} is overwritten,
 using \texttt{ucum} as scratch space, so each new weight is correctly
 indexed by the selected ancestor. At $\beta=0$ the two forms coincide
 trivially (every weight is $1$ regardless of index), which is presumably
-why the error has not surfaced in the classical ($\mathrm{target}=0$)
+why the error had not surfaced in the classical ($\mathrm{target}=0$)
 filter; it is only visible for $\beta>0$.
 
-\section{The mass removed at partial resampling: an apparent defect that is not one}
-\label{sec:credit}
+\paragraph{This is no longer a difference.} Aaron King fixed the positional
+form himself, independently, in commit \texttt{1d8dbc0} (``fix bug in
+weighted particle filter,'' 2026-09-08), which postdates \texttt{1610d34}
+and is not an ancestor of the local clone compared above:
+\begin{lstlisting}[language=Julia, caption={Aaron's \texttt{systematic\_resample!} after commit \texttt{1d8dbc0}, retained-weight step}]
+@inbounds for j ∈ eachindex(p)
+    ucum[j] = w[p[j]]
+end
+@inbounds for j ∈ eachindex(w)
+    w[j] = ucum[j]^β
+end
+\end{lstlisting}
+which is equivalent to Debsurya's form: both index the retained weight by
+the selected ancestor $p(k)$ rather than by resampling slot $k$. The finding
+above is accordingly recorded as a resolved historical point, not a present
+divergence between the two implementations. It is kept in this note in full
+because the same reasoning about which quantity must travel with the
+selected ancestor, rather than with the slot it lands in, is exactly what
+\S\ref{sec:normconst} needs to derive the normalizing constant discarded at
+partial resampling.
+
+\section{The normalizing constant discarded at partial resampling}
+\label{sec:normconst}
 
 Write $w_1,\dots,w_n$ for the unit-mean weights immediately prior to
-resampling, and $S' = \sum_j w_j^{1-\beta}$ for the normalizing sum of the
-selection probabilities $\pi_j = w_j^{1-\beta}/S'$. A short importance-sampling
-argument shows that the \emph{properly weighted} particle representation
-after resampling — the one whose weighted empirical measure is unbiased for
-the same target as before resampling — assigns the particle selected at
-position $k$ (ancestor $j=p(k)$) the weight
+resampling, and $S = \sum_j w_j^{1-\beta}$ for the normalizing sum of the
+selection probabilities $q_j = w_j^{1-\beta}/S$. Because ancestors are drawn
+from $q$ rather than from the weights themselves, the sampling measure has
+changed, and the properly weighted representation assigns the particle
+selected as ancestor $A_k$ at position $k$ the importance weight
 \[
-  w'_k \;=\; w_j^{\beta}\cdot\frac{S'}{n},
+  R_k \;=\; \frac{w_{A_k}}{n\,q_{A_k}} \;=\; \frac{S}{n}\,w_{A_k}^{\beta},
 \]
-not simply $w_j^\beta$. Indeed, for any test function $f$,
+whose sample mean over the $n$ selections,
 \[
-  \mathbb E_{p(k)\sim\pi}\!\left[w'_k\, f(x_{p(k)})\right]
-  \;=\; \sum_j \pi_j\, w_j^\beta\frac{S'}{n} f(x_j)
-  \;=\; \sum_j \frac{w_j^{1-\beta}}{S'}\, w_j^\beta\,\frac{S'}{n}\, f(x_j)
-  \;=\; \frac1n\sum_j w_j f(x_j),
+  C \;=\; \frac1n\sum_{k=1}^n R_k \;=\; \frac{S}{n}\,m,
+  \qquad m = \frac1n\sum_{k=1}^n w_{A_k}^{\beta},
 \]
-reproducing the pre-resampling weighted average exactly, in expectation over
-the resampling randomness, for every $\beta$.
-
-Both implementations instead renormalize the retained weights to unit mean,
-since every other routine in the filter (the effective-sample-size and
-conditional-log-likelihood computation in particular) assumes unit-mean
-weights on entry. Writing $m = n^{-1}\sum_k w_{p(k)}^\beta$ for the mean of
-the retained weights \emph{before} renormalization, dividing every $w'_k$ by
-$m\cdot S'/n$ to enforce unit mean removes exactly this constant factor from
-every particle's weight:
-\[
-  c \;=\; \frac{m S'}{n}.
-\]
-This factor vanishes at $\beta=0$ (where $S'=\sum_j w_j = n$ and every
-retained weight is $1$, so $m=1$ and $c=1$) and at $\beta=1$ (where $S'=n$
-trivially and, since the resampling permutation is the identity,
-$m = n^{-1}\sum_j w_j = 1$, so again $c=1$), but for $0<\beta<1$ we have
-$c\neq 1$ in general.
-
-It is tempting to conclude that the running likelihood is therefore
-understated by a factor of $c$ at every such resampling step unless $c$ is
-credited back, and that Aaron's Julia routine --- which returns
-\texttt{nothing}, its caller discarding it ---
+is \emph{the resampling step's own contribution to the normalizing constant}
+of the unnormalized (Feynman--Kac) measure the filter estimates. Both
+implementations instead store the retained weights renormalized to unit
+mean, $V_k = R_k/C$ — necessary since every other routine in the filter (the
+effective-sample-size and conditional-log-likelihood computation in
+particular) assumes a unit-mean weight vector on entry — and neither
+multiplies $C$ back into the likelihood accumulator. Aaron's Julia routine
+returns \texttt{nothing}, its caller discarding it:
 \begin{lstlisting}[language=Julia, caption={Aaron's \texttt{pfilt\_step\_comps!} (PartiallyObservedMarkovProcesses.jl\_aarons/src/pfilter.jl, line 228)}]
 systematic_resample!(p, w, work, target)   # return value discarded
 \end{lstlisting}
-is biased low for $0<\beta<1$. That conclusion is wrong, and the reason it
-is wrong is worth stating carefully, since the argument for it is
-superficially convincing.
+and R \texttt{pomp}'s \texttt{wpfilter.c} discards it too, by a different
+route: it leaves the carried weights unnormalized and computes each
+conditional log likelihood as a ratio of successive \emph{total} masses
+(\texttt{loglik = maxlogw + log(w) - log(oldw)}, line 110), so that the mass
+change across a resampling step is simply never entered into the likelihood
+at all — it becomes part of the baseline the next step's ratio is taken
+against, with no correction of any kind at the step where it arose. $C$ is
+dropped, not restored, in both of Aaron King's implementations, and, until
+now, in this repository as well.
 
-The derivation above establishes that the credited scheme satisfies the
-proper-weighting identity
-\[
-  \mathbb E\!\left[\hat Z\cdot\frac1n\sum_j W_j\, f(x^j)\right]
-  \;=\; \gamma_k(f)
-\]
-exactly, for every test function $f$ and every $\beta$. The uncredited
-scheme does not satisfy \emph{that} identity. But failure of one
-sufficient condition is not proof of bias: the uncredited scheme satisfies
-a \emph{different} one --- the telescoping identity, under which the
-normalization applied at step $k$ cancels against the increment formed at
-step $k+1$, because each conditional likelihood is a mean of carried
-weights against the next measurement density and is therefore invariant to
-a common rescaling of those weights. The two are alternative routes to
-unbiasedness, not a correct and an incorrect scheme. This is precisely the
-bookkeeping Aaron's R implementation uses: it leaves the carried weights
-unnormalized and computes each conditional log-likelihood as a ratio of
-successive \emph{total} masses (\texttt{wpfilter.c}, line 110,
-\texttt{loglik = maxlogw + log(w) - log(oldw)}). Note that R credits
-nothing at resampling either --- the mass change across the resampling step
-is simply never entered into the likelihood, and the next increment is
-taken relative to the new baseline. The R and Julia versions compute the
-same estimator.
+\subsection*{Why dropping $C$ is a real bias}
 
-The question was settled numerically on the linear-Gaussian reduction of
-the Gompertz model, where the exact likelihood is available in closed
-form from the Kalman filter. Both estimators were computed from the
-\emph{same} draws --- the particle cloud is identical under the two
-conventions, which differ only in a scalar accumulator --- so the
-comparison is exactly paired and the standard error of the difference is
-far smaller than that of either mean. Over $400{,}000$ replicates at each
-of $\beta\in\{0.25,0.5,0.75\}$ and $n\in\{8,16,64\}$, the two expectations
-agree to within $0.003\%$ of $\hat L$, with no significant difference at
-any setting. Representative rows:
-\begin{center}\small
-\begin{tabular}{ccrr}
-\hline
-$n$ & $\beta$ & $\mathbb E[\hat L_{\mathrm{cred}}]-\mathbb E[\hat L_{\mathrm{uncred}}]$ & $z$\\
-\hline
-$8$  & $0.50$ & $-0.000914 \pm 0.000451$ & $-2.02$\\
-$16$ & $0.50$ & $-0.000175 \pm 0.000196$ & $-0.89$\\
-$64$ & $0.50$ & $-0.000062 \pm 0.000061$ & $-1.02$\\
-\hline
-\end{tabular}
-\end{center}
+$C$ is conditionally mean one: $\mathbb E[m\mid w] = \sum_j q_j\,w_j^\beta =
+(\sum_j w_j)/S = n/S$, so $\mathbb E[C\mid w]=1$ exactly. It is tempting to
+conclude from this alone that dropping $C$ costs only variance, since a
+factor with conditional expectation one, multiplied into an
+otherwise-unbiased estimator, cannot change that estimator's expectation.
+That inference needs independence, or at least the absence of the wrong kind
+of correlation, and $C$ does not have it: $C$ is a function of which
+ancestors $A_{1:n}$ were actually selected, and those same ancestors go on
+to generate \emph{every future contribution to the likelihood}. Knowing
+$\mathbb E[C]=1$ does not give $\mathbb E[C\,\ell]=\mathbb E[\ell]$ once $C$
+and $\ell$ are dependent through a shared cause — here, the resampled
+particle cloud itself. Dropping $C$ biases the likelihood estimate downward
+by $\Theta(1/n)$ per resampling step. $C\equiv1$ identically at $\beta=0$
+(where $S=\sum_j w_j=n$ and every retained weight is $1$, so $m=1$) and at
+$\beta=1$ (where $S=n$ trivially and, since uniform systematic selection of
+$n$ ancestors from $n$ slots reproduces the identity permutation, $m =
+n^{-1}\sum_j w_j = 1$ as well), so the ordinary bootstrap filter is entirely
+untouched: this is strictly a partially-retained-weight ($0<\beta<1$)
+phenomenon.
 
-The explanation is that $c = mS'/n$ is a \emph{conditionally mean-one}
-random factor: since $\mathbb E[m] = \sum_j \pi_j w_j^\beta = n/S'$, we have
-$\mathbb E[c]=1$ exactly. Empirically it is also uncorrelated with the
-estimate, so multiplying by it changes no expectation and only adds
-variance --- at $n=8$, $\beta=0.5$ the multiplier has roughly $10\%$
-relative spread.
+\subsection*{An exact counterexample}
 
-Debsurya's translation initially credited the factor explicitly and has
-since had the credit removed, on exactly these grounds. Both
-implementations now apply no correction, and the retained weights are
-simply renormalized to unit mean:
-\begin{lstlisting}[language=Julia, caption={Debsurya's \texttt{systematic\_resample!} (PartiallyObservedMarkovProcesses.jl/src/pfilter.jl)}]
-w ./= mean(w)   # subsequent steps rely on unit-mean weights
-nothing
+Take $n=2$ particles with unit-mean weights $w=(1.8,0.2)$ and $\beta=1/2$.
+Then $q=(0.75,0.25)$, and two-particle systematic resampling gives ancestry
+$(1,1)$ or $(1,2)$, each with probability exactly $1/2$, carrying $C=1.2$
+and $C=0.8$ respectively. Suppose the future contribution from the two
+particles is $g=(1,0)$; the correctly weighted predictive quantity is
+$\frac1n\sum_i w_i g_i = 0.9$. Dropping $C$ gives
+$\frac12(1)+\frac12(0.75)=0.875$; retaining it gives
+$\frac12(1.2\cdot1)+\frac12(0.8\cdot0.75)=0.9$, exactly. This has been
+verified numerically to six decimal places over $4{,}000{,}000$ replicates.
+
+\subsection*{An end-to-end test, and why an earlier check missed this}
+
+\texttt{test/iid.jl} contains two test sets. The first uses a latent process
+with no memory: $X_t$ is drawn afresh, independently of $X_{t-1}$, at every
+step. There the one-step predictive density is the same for every particle
+regardless of which ancestors survive resampling, so the tempered
+resampling step is exactly unbiased whatever it does with $C$ — this model
+is blind to the effect by construction, at any number of replicates. The
+second test uses a frozen binary latent state, $X\sim\mathrm{Bernoulli}(1/2)$
+with $X_t=X$ for all $t$, together with measurement potentials
+$g_1(1)=1.8,\,g_1(0)=0.2$ and $g_2(1)=1.0,\,g_2(0)=0.0$; the exact likelihood
+is $Z=\mathbb E[g_1(X)g_2(X)]=0.9$. At $n=2$ and $\beta=1/2$, dropping $C$
+gives $\mathbb E[\hat Z]\approx0.8879$ against $Z=0.9$ — a $27$-standard-error
+discrepancy over $200{,}000$ replicates — that vanishes when $C$ is restored.
+
+An earlier check, run instead on the linear-Gaussian reduction of the
+Gompertz model against its closed-form Kalman likelihood over $400{,}000$
+paired replicates at $\beta\in\{0.25,0.5,0.75\}$ and $n\in\{8,16,64\}$, found
+no significant difference between the two conventions and was taken,
+wrongly, as evidence that $C$ needed no restoring. That check had
+no power: the bias is $\Theta(1/n)$ per resampling step and vanishes
+identically whenever the one-step predictive density is constant across the
+cloud, which is very nearly true of a smooth, well-mixing latent process
+such as log-Gompertz. The design could resolve differences of roughly
+$0.02\%$ of $\hat L$ against a bias under $0.15\%$ — an underpowered test, not
+a clean null result. A null Monte Carlo comparison is evidence of nothing
+unless the test model can exhibit the effect in question and the design has
+power against it; the frozen-state model above was built specifically to
+have both properties.
+
+\subsection*{The fix}
+
+Debsurya's \texttt{systematic\_resample!} now returns $\log C$ instead of
+\texttt{nothing}, and the caller accumulates it into the running log
+likelihood:
+\begin{lstlisting}[language=Julia, caption={PartiallyObservedMarkovProcesses.jl/src/pfilter.jl, lines 481--490 and 315}]
+    stot::W = s   # S = sum_j w_j^(1-beta)
+    ...
+    m::W = mean(w)
+    w ./= m # subsequent steps rely on the weights having unit mean
+    log(m*stot/n)
 \end{lstlisting}
-The episode is recorded here rather than quietly deleted because the
-mistaken argument is a natural one, and because the resolution --- that a
-scheme can be unbiased by a route other than proper weighting --- is the
-substantive point.
+\begin{lstlisting}[language=Julia, caption={The caller, \texttt{pfilt\_step\_comps!}, line 315}]
+        logLik[] += systematic_resample!(p, w, work, target)
+\end{lstlisting}
+Aaron's Julia translation and R \texttt{pomp}'s \texttt{wpfilter.c} still
+drop $C$, unchanged from the description above.
 
 \section{Terminal ancestry draw under unequal terminal weights}
 \label{sec:ancestry}
@@ -328,7 +369,11 @@ j::I = rand(axes(perm,2))     # uniform draw, regardless of terminal weights
 \end{lstlisting}
 A marginal comment in that file (\texttt{\# FIXME: check that the first
 index in the ancestry is correct}) suggests this was already a point of
-concern.
+concern. Unlike the positional-indexing error of \S\ref{sec:positional},
+this one survives commit \texttt{1d8dbc0}: the terminal draw there (line
+408) is still the uniform \texttt{j = rand(axes(perm,2))}, and the FIXME
+comment (now at line 97) is still unresolved. This is accordingly a live
+difference between the two implementations, not a historical one.
 
 A minimal counterexample makes the resulting bias concrete. Suppose two
 terminal particles carry weights $W=(0.9,\,0.1)$ — an entirely ordinary
@@ -344,7 +389,7 @@ coincidence, when the terminal weights happen to be equal.
 
 Debsurya's \texttt{trace\_ancestry!} initiates the draw proportional to the
 terminal weights before tracing backward:
-\begin{lstlisting}[language=Julia, caption={Debsurya's weighted \texttt{trace\_ancestry!} (PartiallyObservedMarkovProcesses.jl/src/pfilter.jl, lines 508--544), initiation step}]
+\begin{lstlisting}[language=Julia, caption={Debsurya's weighted \texttt{trace\_ancestry!} (PartiallyObservedMarkovProcesses.jl/src/pfilter.jl, lines 518--554), initiation step}]
 s::W = 0
 for k in eachindex(w)
     v::W = w[k]
@@ -442,13 +487,13 @@ parameters.
 \textbf{Issue} & \textbf{Aaron's Julia} & \textbf{Debsurya's Julia} \\
 \midrule
 Retained weight indexing (\S\ref{sec:positional})
-  & positional: $w_k^\beta$
-  & ancestor-indexed: $w_{p(k)}^\beta$ \\[0.4em]
-Mass credit at $0<\beta<1$ (\S\ref{sec:credit})
-  & none
-  & none \newline\emph{(credit added, then reverted: no bias, added variance)} \\[0.4em]
+  & ancestor-indexed \newline\emph{(positional at \texttt{1610d34}; fixed independently at \texttt{1d8dbc0})}
+  & ancestor-indexed: $w_{p(k)}^\beta$ \newline\emph{(no longer a difference)} \\[0.4em]
+Normalizing constant $C$ at $0<\beta<1$ (\S\ref{sec:normconst})
+  & dropped \newline\emph{(bug: biases $\hat L$ low by $\Theta(1/n)$ per resampling step)}
+  & restored: \texttt{logLik[] += log C} \\[0.4em]
 Terminal ancestry draw (\S\ref{sec:ancestry})
-  & uniform
+  & uniform \newline\emph{(unchanged at \texttt{1d8dbc0})}
   & proportional to terminal weight \\[0.4em]
 Per-step resampling flag (\S\ref{sec:resampled})
   & absent
@@ -460,17 +505,24 @@ Per-step resampling flag (\S\ref{sec:resampled})
 \end{tabular}
 \end{center}
 
-\noindent The first and third rows are not differences of taste: for
-$\mathrm{target}>0$ they change, respectively, which particle's information
-is retained after resampling and the distribution represented by the stored
-filtered trajectory. Both coincide with Aaron's own implementations only at
-the untempered endpoints $\beta\in\{0,1\}$, which is presumably why they
-have not previously been visible in the classical ($\mathrm{target}=0$)
-filter that both repositories have exercised most. Neither, however,
-disturbs the marginal log-likelihood, so neither would have been caught by
-comparing likelihood estimates: they were found by reading the code. The
-second row, by contrast, \emph{would} have shown up in such a comparison
-had it been a genuine defect --- and the fact that it did not is exactly
-the evidence that it was not one.
+\noindent Of the five rows, only the third and fourth are differences of the
+comparison sort this note set out to find: for $\mathrm{target}>0$, the
+terminal ancestry draw changes the distribution represented by the stored
+filtered trajectory, and the resampling flag is simply present in one
+implementation and not the other. Neither disturbs the marginal
+log-likelihood, so neither would have been caught by comparing likelihood
+estimates; they were found by reading the code. The first row was of the
+same kind — it would have changed which particle's information survives
+resampling for $\mathrm{target}>0$ — but Aaron King fixed it independently
+before this note was finished, so it is recorded as resolved rather than
+open. The second row is different in kind from all the others: it is not a
+difference of code structure but a shared numerical defect, present in
+Aaron's Julia translation and in R \texttt{pomp} alike, that this
+repository has now corrected. Unlike the first and third rows, it
+\emph{does} disturb the marginal log-likelihood, by $\Theta(1/n)$ per
+resampling step at every $0<\beta<1$; the reason it went undetected for as
+long as it did is that the model used to check the filter's likelihood
+against an exact reference happened to be almost exactly the case,
+described in \S\ref{sec:normconst}, in which the effect vanishes.
 
 \end{document}

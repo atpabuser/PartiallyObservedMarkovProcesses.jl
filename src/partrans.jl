@@ -84,11 +84,24 @@ in `tags` pass through unchanged. `logbarycentric` names one group (a
 `Tuple` of `Symbol`s) or several disjoint groups (a `Tuple` of `Tuple`s
 of `Symbol`s) of parameters to be jointly transformed by the log
 barycentric transformation,
-``T_i=\\log(\\theta_i/\\textstyle\\sum_{j\\in g}\\theta_j)``, with
-inverse ``\\theta_i=e^{T_i}/\\sum_{j\\in g}e^{T_j}``: this is a bijection
-of the interior of the unit simplex onto Euclidean space, so the
-natural-scale values recovered by the inverse transformation always sum
-to one. Group members must not also be named in `tags`.
+``T_i=\\log(\\theta_i/\\textstyle\\sum_{j\\in g}\\theta_j)``, paired with
+``\\theta_i=e^{T_i}/\\sum_{j\\in g}e^{T_j}``, so the natural-scale values
+recovered by the second map always sum to one. Group members must not
+also be named in `tags`.
+
+The pair is mutually inverse in one direction only. Composing `to` then
+`from` is the identity on the interior of the simplex, but the reverse
+composition is not the identity on ``\\mathbb{R}^k``: the second map is
+invariant under ``T\\mapsto T+c\\mathbf{1}``, so the ``k`` coordinates
+carry only ``k-1`` degrees of freedom and `from` is not injective. The
+image of `to` is the manifold ``\\{T:\\sum_i e^{T_i}=1\\}``, and `to` is a
+bijection of the simplex interior onto *that*, not onto Euclidean space.
+
+For iterated filtering the redundancy is harmless — a Gaussian step
+leaves the manifold and the second map projects back onto the simplex,
+giving a logistic-normal perturbation in which the common direction is
+quotiented out — but that direction is unconstrained by the data and
+random-walks freely across iterations.
 
 In the second form, `to` and `from` are supplied directly as a mutually
 inverse pair of `NamedTuple`-to-`NamedTuple` functions.

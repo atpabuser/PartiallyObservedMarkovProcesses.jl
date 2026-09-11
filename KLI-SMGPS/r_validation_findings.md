@@ -6,10 +6,16 @@ exact Kalman-filter likelihood available on a linear-Gaussian reduction
 of the Gompertz model, and R pomp 6.4.0.3's own filtering output on the
 same model and data. The checks proceed from the most elementary
 building block (agreement of measurement densities) up through the
-full trigger/target-tempered filter, and close with a list of concrete
-discrepancies found between Aaron King's Julia translation and his own
-R implementation — discrepancies present only in the Julia code, not
-in the R code they were meant to reproduce.
+full trigger/target-tempered filter, and close with the concrete issues
+found in the course of it.
+
+A warning about §§1–4 before they are read. They establish agreement,
+and agreement is not correctness: the most consequential issue found
+(§5) is one that both implementations share, so every comparison
+between them agrees perfectly while both are biased. The one reference
+in this note that is independent of any implementation is the Kalman
+likelihood in §3, and the model it is evaluated on turns out to have
+almost no power against the effect in question.
 
 Throughout, the working example is the Gompertz population model
 together with the *Parus major* (Great Tit) census data of Wytham
@@ -95,106 +101,133 @@ the accompanying correspondence: resample with probability
 proportional to w^(1-β) and carry forward a residual weight w^β,
 renormalized to unit mean, rather than resampling to exactly equal
 weights). A grid over trigger ∈ {0.5, 1.0} × target ∈ {0.0, 0.3, 0.5}
-was run against R pomp's `wpfilter`, and the two agree cell by cell —
-validating both the power-tempered resampling weight and the
-ESS-triggered resampling decision, separately and in combination,
-rather than only at the trigger=1/target=0 corner already covered in
-§2.
+was run against R pomp's `wpfilter`, and the two agree cell by cell.
+
+This was originally read as validating the power-tempered resampling
+weight and the ESS-triggered resampling decision beyond the
+trigger=1/target=0 corner of §2. It does not. R's `wpfilter` keeps its
+carried weights unnormalized and forms each conditional log likelihood
+as a ratio of successive total masses, which is algebraically the same
+estimator as the unit-mean convention with the normalizing constant
+discarded. Both sides of this comparison therefore drop the same factor,
+and the agreement is evidence that the two implement the same algorithm,
+not that the algorithm is unbiased. See §5.
 
 ## 5. What was found
 
-Comparing Aaron King's own, earlier Julia translation of the filter
-against his R implementation (the C routine behind `wpfilter`) turned
-up two genuine discrepancies, listed first, and one apparent
-discrepancy that on closer examination was not one at all — recorded
-here as well, since the reasoning that dismissed it is the more
-instructive of the two outcomes.
+Three issues, in descending order of consequence. The first disturbs the
+likelihood and is present in every implementation examined, including
+this one until it was corrected. The second was a real defect in the
+earlier upstream lineage and has since been fixed by its author. The
+third remains a genuine difference.
 
-- **Retained weight after resampling is assigned in the wrong order.**
-  Aaron's Julia `systematic_resample!` selects ancestors from the
-  cumulative sums of w^(1-β), then raises the *entire weight vector*
-  to the power β **in its original positional order** and renormalizes
-  — so the retained weight credited to output slot k is w_k^β, the
-  weight of whichever particle happened to occupy position k
-  *before* resampling, not the weight of the particle actually
-  selected into slot k. Aaron's R implementation (`wpfilter.c`, line
-  188, `wt[k] = ws[sp]`, where `sp` is the sampled ancestor index) does
-  this correctly: it copies the *selected ancestor's* retained weight
-  into the new slot, so the weight travels with the particle it
-  belongs to. Since each original weight factors as
-  w = w^(1-β)·w^β, with the w^(1-β) factor already expressed through
-  the multiplicity with which a particle is selected, the accompanying
-  w^β factor must travel with that same particle for the carried
-  weighted representation to target the correct measure. The
-  positional form is a bug; the R form is the intended design.
+### The principal finding: a discarded normalizing constant
 
-- **The terminal ancestry draw is uniform rather than weighted.**
-  Aaron's `trace_ancestry!` initiates the stored ancestral lineage with
-  a uniform draw over the terminal particle indices, regardless of
-  their carried weights. Whenever the terminal cloud is unequally
-  weighted — which follows whenever β > 0, or simply from a
-  `trigger < 1` step that skipped resampling — this
-  targets the wrong distribution (see the accompanying proof in
-  `ancestry_proof.md`). No R-side implementation issue applies here
-  directly, since R pomp's `wpfilter` does not itself perform lineage
-  tracing to reconstruct a stored trajectory; the correct behavior is
-  simply what the weighted representation already requires: a draw
-  proportional to the terminal weights before tracing backward.
+Ancestors are selected with probability qᵢ = wᵢ^(1-β)/S, where
+S = Σᵢ wᵢ^(1-β) and the carried weights have unit mean. Selecting from
+q rather than from the weights themselves changes the sampling measure,
+so the properly weighted representation assigns the particle selected
+at position j the importance weight
 
-### An apparent third issue that was not one
+  R_j = w_{A_j}/(J·q_{A_j}) = (S/J)·w_{A_j}^β,
 
-The unit-mean convention used throughout the Julia routine rescales the
-retained weights by a common factor at every resampling step. Writing
-S' = Σ w^(1-β) and m for the mean of the retained weights before
-renormalization, the properly weighted representation assigns each
-selected particle the weight w^β·S'/J, so the unit-mean convention
-discards the factor m·S'/J — a factor that vanishes at β = 0 and β = 1
-but not in between. This was initially recorded as a third defect, on
-the grounds that the credited form satisfies the proper-weighting
-identity
+whose sample mean is
 
-  E[ Ẑ · (1/J) Σⱼ Wⱼ φ(xʲ) ] = γₙ(φ)
+  C = (1/J) Σⱼ R_j = (S/J)·m,    m = mean_j w_{A_j}^β.
 
-exactly, whereas the uncredited form does not, and the credit was
-added to the running log likelihood.
+C is the resampling step's contribution to the normalizing constant of
+the unnormalized measure. Renormalizing the retained weights to unit
+mean stores V_j = R_j/C, so C must multiply the likelihood accumulator
+or it is lost. C ≡ 1 at β = 0 and β = 1, so the ordinary bootstrap
+filter is unaffected; this is strictly the partially retained-weight
+case.
 
-That reasoning was mistaken. Failure of *that* identity does not imply
-bias: the uncredited form satisfies a different one — the telescoping
-identity, under which the normalization applied at step n cancels
-against the increment at step n+1 — and is equally unbiased. The two
-are alternative proofs of unbiasedness, not a correct and an incorrect
-scheme.
+Both Aaron's Julia versions — before and after `1d8dbc0` — drop C, and
+so did this translation for a day (see the history note below). The
+defence that suggests itself is that E[C | w] = 1 exactly, which it is:
+E[m | w] = Σᵢ qᵢwᵢ^β = (Σᵢ wᵢ)/S = J/S. But C is a function of the
+selected ancestors and therefore correlated with everything those
+ancestors go on to generate, so E[C] = 1 does not give E[C·ℓ] = E[ℓ].
 
-The point was settled numerically on the linear-Gaussian reduction of
-Gompertz, where the Kalman filter supplies exact truth. Both
-estimators were computed from the same draws — the particle cloud is
-identical under the two conventions, which differ only in a scalar
-accumulator — so the comparison is exactly paired and its standard
-error is far smaller than that of either mean. Over 400,000 replicates
-at each of β ∈ {0.25, 0.5, 0.75} and J ∈ {8, 16, 64}, the two
-expectations agree to within 0.003% of L̂, with no significant
-difference at any setting. Since m·S'/J is a conditionally mean-one
-factor uncorrelated with the estimate, crediting it adds variance and
-nothing else. The credit was accordingly removed, and the present
-translation follows the same bookkeeping as both of Aaron's versions.
+The demonstration is exact rather than statistical. Take J = 2,
+w = (1.8, 0.2), β = ½. Then q = (0.75, 0.25), and two-particle
+systematic resampling gives ancestry (1,1) or (1,2) with probability
+exactly ½ each, carrying C = 1.2 and C = 0.8. With future contributions
+g = (1, 0) the correctly weighted predictive quantity is
+(1/J)Σᵢ wᵢgᵢ = 0.9. Dropping C gives ½·1 + ½·0.75 = 0.875; retaining it
+gives ½·(1.2·1) + ½·(0.8·0.75) = 0.9, exactly. The bias is Θ(1/J) per
+resampling step.
 
-### Summary
+`test/iid.jl` carries this end to end. On a frozen binary latent state —
+X ~ Bernoulli(½) with Xₜ = X for all t, so the surviving particle
+determines the entire future — the exact likelihood is Z = 0.9, and at
+Np = 2 the dropped-C estimator returns E[Ẑ] = 0.8879, a
+27-standard-error discrepancy that vanishes when C is restored.
 
-Both genuine issues are present in Aaron's Julia translation and not in
-his R code — the R code implements the retained-weight assignment
-correctly, and the terminal-draw issue is specific to a lineage-tracing
-feature the R implementation does not provide. The present translation
-adopts the R form in both cases: copying the selected ancestor's
-retained weight, and drawing the terminal ancestry index proportional
-to the carried weights.
+### History: why this was retracted, wrongly
 
-Neither would have been caught by the marginal-log-likelihood
-comparisons of §§2–4. Both affect the identity and weighting of
-individual retained particles without disturbing the average log
-likelihood, so those checks would have passed either way. The
-retained-weight defect was found by direct code inspection against the
-R source; the terminal-draw defect by Aaron's own marginal note in the
-code questioning whether the first index in the ancestry was correct.
-This is worth stating plainly: the likelihood-level agreement
-documented in §§1–4 is necessary but not sufficient, and the two
-defects that mattered were found by reading, not by testing.
+The finding above was made, then retracted, then reinstated. The
+retraction rested on a paired comparison of the two estimators on the
+linear-Gaussian reduction of Gompertz over 400,000 replicates at each of
+β ∈ {0.25, 0.5, 0.75} and J ∈ {8, 16, 64}, which found the two
+expectations agreeing to within 0.003% of L̂ with no significant
+difference anywhere.
+
+That check had no power. The bias is Θ(1/J) per step, and it vanishes
+identically whenever the one-step predictive density is constant across
+the cloud — which is exactly what happens when the latent process has
+no memory, and nearly what happens when it mixes well. The design could
+resolve about 0.02% of L̂ against a bias under 0.15%. When the same
+experiment was rerun with the weight disparity increased, the sign
+returned as the theory requires.
+
+The first testset in `test/iid.jl` records the degenerate case
+deliberately: an i.i.d. latent process is *blind* to this issue at any
+number of replicates, which is why the frozen-state testset exists
+beside it.
+
+Two lessons, both general:
+
+- A null Monte Carlo result is worth nothing unless the test model can
+  exhibit the effect and the design has power against it. State the
+  standard error next to every null.
+- A conditionally mean-one factor is harmless only if it is also
+  independent of everything downstream.
+
+### The retained weight, and what remains a difference
+
+Assigning the retained weight in positional order rather than by
+selected ancestor was a real defect in the pre-`1d8dbc0` upstream
+lineage, and the mathematical reason stands: each weight factors as
+w = w^(1-β)·w^β, the w^(1-β) factor is already expressed through the
+multiplicity of selection, so the retained w^β factor must accompany
+the particle it came from. Aaron fixed this himself in `1d8dbc0` on
+2026-09-08, independently, and his fix agrees with this one. It is
+therefore no longer a difference between the two implementations, and
+is recorded here only because the comparison in §§1–4 was made against
+the earlier code.
+
+What does remain a difference is the terminal ancestry draw. At
+`1d8dbc0` line 408 `trace_ancestry!` still initiates the lineage with a
+uniform draw over terminal particles, with Aaron's own FIXME at line 97
+questioning whether the first ancestry index is correct. Whenever
+β > 0, or a `trigger < 1` step skips resampling, the terminal cloud is
+unequally weighted and the uniform draw targets the wrong measure (see
+`ancestry_proof.md`). This affects only the measure represented by the
+stored trajectory and the reported initial ancestor, not the likelihood.
+
+### What the likelihood comparisons could and could not catch
+
+Of the three issues, only the discarded normalizing constant disturbs
+the marginal likelihood — and the comparisons in §§2–4 still failed to
+catch it, for two separate reasons. Comparing two implementations that
+share the same defect produces perfect agreement, which is what §4's
+trigger/target grid did. And the Kalman reference in §3 is exact but was
+exercised on a model with almost no power against the effect.
+
+The retained-weight and terminal-draw issues affect the identity and
+weighting of individual particles without disturbing the average log
+likelihood, so no likelihood comparison of any power would have found
+them; both were found by reading the code, one of them by its own
+author. The agreement documented in §§1–4 is necessary but a long way
+from sufficient.
