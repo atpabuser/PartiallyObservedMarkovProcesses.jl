@@ -114,4 +114,84 @@ using BenchmarkTools
     ]
     @test maximum(lls)-minimum(lls) < 0.5
 
+    ## --- the normalizing constant discarded at partial resampling ---------
+    ##
+    ## Ancestors are selected with probability qᵢ = wᵢ^(1-β)/S, where
+    ## S = Σᵢ wᵢ^(1-β), so the properly weighted representation assigns the
+    ## particle selected at position j the importance weight
+    ## R_j = w_{A_j}/(J·q_{A_j}) = (S/J)·w_{A_j}^β, whose sample mean is
+    ## C = (S/J)·mean_j w_{A_j}^β. Renormalizing the retained weights to
+    ## unit mean stores R_j/C, so C must be returned and credited to the
+    ## conditional log likelihood.
+    ##
+    ## With J = 2 the systematic sweep is driven by a single uniform, so the
+    ## ancestry is a piecewise-constant function of it and the expectation
+    ## is a finite sum. This is therefore an exact check with no Monte Carlo
+    ## tolerance -- the companion to the end-to-end test in test/iid.jl,
+    ## which exercises the same property through the full filter.
+    let w0 = [1.8,0.2], β = 0.5, g = [1.0,0.0]
+        ## `systematic_resample!` returns log C and leaves `w` unit-mean,
+        ## so both quantities can be read off a single call.
+        step(p_forced) = begin
+            α = 1-β
+            S = sum(w0.^α)
+            wr = [w0[j]^β for j ∈ p_forced]
+            m = sum(wr)/2
+            C = m*S/2
+            ℓ = sum(wr[j]/m*g[p_forced[j]] for j ∈ 1:2)/2
+            (C,ℓ)
+        end
+
+        ## cumulative selection mass (w₁^α, S); sweep points u and u+S/2
+        ## with u ~ Uniform(0,S/2); p[1] = 1 always, p[2] = 1 iff u ≤ w₁^α-S/2
+        α = 1-β
+        S = sum(w0.^α)
+        pr11 = clamp((w0[1]^α-S/2)/(S/2),0.0,1.0)
+        @test pr11 ≈ 0.5
+
+        (C11,l11) = step([1,1])
+        (C12,l12) = step([1,2])
+        @test C11 ≈ 1.2
+        @test C12 ≈ 0.8
+
+        exact   = sum(w0.*g)/2
+        without = pr11*l11 + (1-pr11)*l12
+        with    = pr11*C11*l11 + (1-pr11)*C12*l12
+
+        @test exact ≈ 0.9
+        @test with ≈ exact atol=1e-12       # retaining C is exact
+        @test without ≈ 0.875 atol=1e-12    # dropping C is biased
+
+        ## the factor is conditionally mean-one, and still shifts the
+        ## expectation, because it is correlated with the ancestry
+        EC = pr11*C11 + (1-pr11)*C12
+        @test EC ≈ 1.0 atol=1e-12
+        @test abs(with-EC*without) > 1e-6
+
+        ## C ≡ 1 at both endpoints, so the classical and fully weighted
+        ## filters are untouched
+        for b ∈ (0.0,1.0)
+            a = 1-b
+            Sb = sum(w0.^a)
+            pr = clamp((w0[1]^a-Sb/2)/(Sb/2),0.0,1.0)
+            cs = map(pp -> begin
+                wrb = [w0[j]^b for j ∈ pp]
+                mb = sum(wrb)/2
+                (mb*Sb/2, sum(wrb[j]/mb*g[pp[j]] for j ∈ 1:2)/2)
+            end,([1,1],[1,2]))
+            wo = pr*cs[1][2] + (1-pr)*cs[2][2]
+            @test wo ≈ exact atol=1e-12
+        end
+    end
+
+    ## the live routine must return log C, not `nothing`
+    let w = [1.8,0.2], work = zeros(2), p = zeros(Int,2)
+        Random.seed!(4242)
+        lc = POMP.systematic_resample!(p,w,work,0.5)
+        @test lc isa AbstractFloat
+        @test isfinite(lc)
+        @test sum(w)/2 ≈ 1.0 atol=1e-12          # left unit-mean
+        @test exp(lc) ≈ (p==[1,1] ? 1.2 : 0.8) atol=1e-10
+    end
+
 end

@@ -312,7 +312,7 @@ pfilt_step_comps!(
 ) where {W<:AbstractFloat,I<:Integer,X<:NamedTuple} = begin
     logwmax = compute_ess_logLik!(ess, logLik, logw, w)
     if isfinite(logwmax) && ess[] ≤ trigger*n
-        systematic_resample!(p, w, work, target)
+        logLik[] += systematic_resample!(p, w, work, target)
         @inbounds xf .= xp[p]
         resamp[] = true
     else
@@ -439,14 +439,21 @@ end
 ## overwritten with the (unit-mean renormalized) retained weights.
 ## `ucum` is working memory.
 ##
-## Renormalizing the retained weights to unit mean rescales them all by
-## a common factor. Each conditional likelihood is formed as the mean
-## of the carried weights against the next measurement density, so that
-## factor cancels against the following step's normalization and the
-## product of the conditional likelihoods remains an unbiased estimate
-## of the likelihood for every β -- the same bookkeeping as the ratio
-## of successive unnormalized masses used in the R implementation. No
-## compensating factor is therefore credited here.
+## The properly weighted representation after selection assigns the
+## selected particle the weight w^β·(Σᵢ wᵢ^(1-β))/n. Renormalizing the
+## retained weights to unit mean divides that by the common factor
+## c = m·(Σᵢ wᵢ^(1-β))/n, where m is the mean of the retained weights.
+## That factor is returned, as a log, to be credited to the conditional
+## log likelihood.
+##
+## c is conditionally mean-one, but it is a function of the selected
+## ancestors and therefore correlated with everything those ancestors
+## go on to generate; dropping it biases the likelihood estimate
+## downward by Θ(1/n) per resampling step. It vanishes identically at
+## β = 0, and also whenever the one-step predictive density is constant
+## across the cloud (a latent process without memory), which is why a
+## model with independent states cannot exhibit the effect. See
+## test/iid.jl.
 systematic_resample!(
     p::AbstractArray{I,1},
     w::AbstractArray{W,1},
@@ -471,14 +478,16 @@ systematic_resample!(
         end
         p[j] = i
     end
+    stot::W = s   # Σⱼ wⱼ^(1-β), retained for the mass credit below
     @inbounds for j ∈ eachindex(p)
         ucum[j] = w[p[j]]^β
     end
     @inbounds for j ∈ eachindex(w)
         w[j] = ucum[j]
     end
-    w ./= mean(w) # subsequent steps rely on the weights having unit mean
-    nothing
+    m::W = mean(w)
+    w ./= m # subsequent steps rely on the weights having unit mean
+    log(m*stot/n)
 end
 
 trace_ancestry!(
