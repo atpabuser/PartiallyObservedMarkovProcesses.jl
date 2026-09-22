@@ -24,7 +24,7 @@ whose sample mean is
 C is the resampling step's contribution to the normalizing constant of the unnormalized measure. Both our versions instead store the retained weights renormalized to unit mean, V_j = R_j / C, and neither multiplies C into the likelihood accumulator:
 
 ```julia
-# your systematic_resample! (current devel, after 1d8dbc0)
+# your systematic_resample! (as of 1d8dbc0)
 w ./= mean(w)
 nothing
 ```
@@ -45,11 +45,11 @@ I have also built this into an end-to-end filter test — a frozen binary latent
 
 Two caveats on my own account. First, I originally found this, then retracted it on the strength of a Gompertz check that showed no difference; that check had no power, because the bias is Θ(1/J) per step and vanishes identically whenever the one-step predictive density is constant across the cloud — which is exactly what happens when the latent process has no memory. A smooth model with a well-mixing state is close to that degenerate case, and my design could resolve about 0.02% against a bias under 0.15%. Second, C ≡ 1 at β = 0 and β = 1, so nothing here touches the ordinary bootstrap filter; it is strictly the partially retained-weight case.
 
-If this is right, it affects your current devel as well as my translation. Restoring C is a two-line change: return log(m·S/J) from `systematic_resample!` and add it to the conditional log likelihood in `pfilt_step_comps!`.
+If this is right, it affects your devel as well as my translation. Restoring C is a two-line change: return log(m·S/J) from `systematic_resample!` and add it to the conditional log likelihood in `pfilt_step_comps!`.
 
 3. On the retained weights themselves: I had this in an earlier draft as a second finding, but you fixed it yourself in `1d8dbc0` before I got here, and your fix and mine agree — the retained weight must follow the selected ancestor rather than staying at the position it lands in. I mention it only so you know I was looking at the pre-`1d8dbc0` code, and that the observation is now yours, not mine.
 
-4. On the terminal draw for the stored ancestral lineage: whenever β > 0, or `trigger` skips resampling at some step, the terminal cloud is unequally weighted. As I read `trace_ancestry!`, the lineage is initiated by a uniform draw over the terminal particles:
+4. On the terminal draw for the stored ancestral lineage — since resolved, and recorded here only because it came up alongside the above. Whenever β > 0, or `trigger` skips resampling at some step, the terminal cloud is unequally weighted. In the version I was reading, `trace_ancestry!` initiated the lineage with a uniform draw over the terminal particles:
 
 ```julia
 # your trace_ancestry! (1d8dbc0, line 408)

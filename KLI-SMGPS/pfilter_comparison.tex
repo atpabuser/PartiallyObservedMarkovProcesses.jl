@@ -80,13 +80,26 @@ since fixed this himself, independently, in commit \texttt{1d8dbc0}, in a
 form equivalent to Debsurya's, so it is recorded here as a resolved
 historical point --- and the comparison against it explicitly as a
 comparison against the pre-\texttt{1d8dbc0} code --- rather than as a live
-divergence. Two further, still-live differences are documented: an unequally
-weighted terminal ancestry draw, which Aaron's code initiates uniformly
-rather than proportional to the terminal weights, and the presence, in
-Debsurya's translation only, of a per-step resampling diagnostic. It closes
+divergence. Two further differences are documented: an unequally weighted
+terminal ancestry draw, which Aaron's code initiated uniformly rather than
+proportional to the terminal weights, and the presence, in Debsurya's
+translation only, of a per-step resampling diagnostic. It closes
 with the resulting unification of \texttt{wpfilter} as a thin wrapper around
 \texttt{pfilter}.
 \end{abstract}
+\vspace{0.6em}
+\noindent\textbf{Status, 21 September 2026.}\; Every finding in this note has
+since been fixed upstream, following correspondence with its author: the
+normalizing constant in \texttt{3dac3b5} (``ensure unbiasedness of pfilter'',
+16 September) and the terminal ancestry draw in \texttt{24febe8}
+(9 September). The upstream correction is arithmetically identical to the one
+described here, written against a unit-sum rather than a unit-mean weight
+convention --- $\log(s\cdot du)$ with $s=\sum_j w_{A_j}^\beta$ and $du=S/n$,
+in place of $\log(mS/n)$; the two agree to $1.4\times10^{-16}$ on the
+two-particle case below. What follows is therefore a record of the argument
+and of why the obvious tests missed it, not a description of a current
+divergence.
+
 
 \section{The trigger/target resampling scheme}
 
@@ -362,8 +375,9 @@ trajectory therefore requires initiating the traced lineage at the terminal
 time with probability proportional to the terminal weights, then tracing
 ancestry backward through the recorded permutations.
 
-Aaron's \texttt{trace\_ancestry!} initiates the draw uniformly, regardless of
-the terminal weights:
+Aaron's \texttt{trace\_ancestry!}, at the revision compared against here,
+initiated the draw uniformly, regardless of the terminal weights (fixed
+upstream in \texttt{24febe8}):
 \begin{lstlisting}[language=Julia, caption={Aaron's \texttt{trace\_ancestry!} (PartiallyObservedMarkovProcesses.jl\_aarons/src/pfilter.jl, line 397)}]
 j::I = rand(axes(perm,2))     # uniform draw, regardless of terminal weights
 \end{lstlisting}
@@ -490,10 +504,10 @@ Retained weight indexing (\S\ref{sec:positional})
   & ancestor-indexed \newline\emph{(positional at \texttt{1610d34}; fixed independently at \texttt{1d8dbc0})}
   & ancestor-indexed: $w_{p(k)}^\beta$ \newline\emph{(no longer a difference)} \\[0.4em]
 Normalizing constant $C$ at $0<\beta<1$ (\S\ref{sec:normconst})
-  & dropped \newline\emph{(bug: biases $\hat L$ low by $\Theta(1/n)$ per resampling step)}
+  & dropped at \texttt{1d8dbc0} \newline\emph{(biases $\hat L$ by $\Theta(1/n)$ per step; fixed upstream in \texttt{3dac3b5})}
   & restored: \texttt{logLik[] += log C} \\[0.4em]
 Terminal ancestry draw (\S\ref{sec:ancestry})
-  & uniform \newline\emph{(unchanged at \texttt{1d8dbc0})}
+  & uniform at \texttt{1d8dbc0} \newline\emph{(fixed upstream in \texttt{24febe8})}
   & proportional to terminal weight \\[0.4em]
 Per-step resampling flag (\S\ref{sec:resampled})
   & absent

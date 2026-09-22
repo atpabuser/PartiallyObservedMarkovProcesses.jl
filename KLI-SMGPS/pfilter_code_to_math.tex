@@ -81,6 +81,19 @@ lesson about what a null Monte Carlo comparison can and cannot show.
 Section~\ref{sec:kalman} gives the general validation of the filter against
 the exact Kalman likelihood for the Gompertz model.
 \end{abstract}
+\vspace{0.6em}
+\noindent\textbf{Status, 21 September 2026.}\; Every finding in this note has
+since been fixed upstream, following correspondence with its author: the
+normalizing constant in \texttt{3dac3b5} (``ensure unbiasedness of pfilter'',
+16 September) and the terminal ancestry draw in \texttt{24febe8}
+(9 September). The upstream correction is arithmetically identical to the one
+described here, written against a unit-sum rather than a unit-mean weight
+convention --- $\log(s\cdot du)$ with $s=\sum_j w_{A_j}^\beta$ and $du=S/n$,
+in place of $\log(mS/n)$; the two agree to $1.4\times10^{-16}$ on the
+two-particle case below. What follows is therefore a record of the argument
+and of why the obvious tests missed it, not a description of a current
+divergence.
+
 
 \tableofcontents
 

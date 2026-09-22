@@ -115,11 +115,9 @@ not that the algorithm is unbiased. See §5.
 
 ## 5. What was found
 
-Three issues, in descending order of consequence. The first disturbs the
-likelihood and is present in every implementation examined, including
-this one until it was corrected. The second was a real defect in the
-earlier upstream lineage and has since been fixed by its author. The
-third remains a genuine difference.
+Three issues, in descending order of consequence. All three have since
+been fixed, here and upstream; what follows records the reasoning, not a
+current defect. See the status note at the end for dates and commits.
 
 ### The principal finding: a discarded normalizing constant
 
@@ -142,8 +140,10 @@ or it is lost. C ≡ 1 at β = 0 and β = 1, so the ordinary bootstrap
 filter is unaffected; this is strictly the partially retained-weight
 case.
 
-Both Aaron's Julia versions — before and after `1d8dbc0` — drop C, and
-so did this translation for a day (see the history note below). The
+Every implementation examined dropped C at the time of writing — both
+of Aaron's Julia versions, before and after `1d8dbc0`, and R pomp's
+`wpfilter` by its ratio-of-masses route — and so did this translation
+for a day (see the history note below). Upstream has since fixed it. The
 defence that suggests itself is that E[C | w] = 1 exactly, which it is:
 E[m | w] = Σᵢ qᵢwᵢ^β = (Σᵢ wᵢ)/S = J/S. But C is a function of the
 selected ancestors and therefore correlated with everything those
@@ -207,14 +207,33 @@ therefore no longer a difference between the two implementations, and
 is recorded here only because the comparison in §§1–4 was made against
 the earlier code.
 
-What does remain a difference is the terminal ancestry draw. At
-`1d8dbc0` line 408 `trace_ancestry!` still initiates the lineage with a
-uniform draw over terminal particles, with Aaron's own FIXME at line 97
-questioning whether the first ancestry index is correct. Whenever
-β > 0, or a `trigger < 1` step skips resampling, the terminal cloud is
-unequally weighted and the uniform draw targets the wrong measure (see
-`ancestry_proof.md`). This affects only the measure represented by the
-stored trajectory and the reported initial ancestor, not the likelihood.
+The terminal ancestry draw was the same story. At `1d8dbc0` line 408
+`trace_ancestry!` initiated the lineage with a uniform draw over
+terminal particles, with Aaron's own FIXME at line 97 questioning
+whether the first ancestry index was correct. Whenever β > 0, or a
+`trigger < 1` step skips resampling, the terminal cloud is unequally
+weighted and a uniform draw targets the wrong measure (the proof is in
+`ancestry_proof.md`, and stands on its own). That affects only the
+measure represented by the stored trajectory and the reported initial
+ancestor, never the likelihood.
+
+Upstream fixed it in `24febe8` on 2026-09-09, giving `trace_ancestry!` a
+`weights` argument and drawing in proportion to them, and adjusted it
+for the unit-sum convention in `606d801`. Neither issue in this section
+is a live difference any more.
+
+### Status, 2026-09-21
+
+Both findings above were reported to Aaron King and both are now fixed
+upstream: the normalizing constant in `3dac3b5` ("ensure unbiasedness of
+pfilter", 2026-09-16) and the terminal draw in `24febe8`. His credit is
+arithmetically identical to the one described here, written against a
+unit-sum rather than a unit-mean weight convention — `log(s·du)` with
+`s = Σⱼ w_{Aⱼ}^β` and `du = S/n` in place of `log(m·S/n)`. Verified
+equal to 1.4 × 10⁻¹⁶ on the two-particle case.
+
+This note is therefore a record of how the finding was arrived at and
+why the obvious tests missed it, not a description of a current defect.
 
 ### What the likelihood comparisons could and could not catch
 
