@@ -6,6 +6,10 @@ h1 = crayon"bold blue"
 h2 = s -> crayon"!bold light_yellow"("- "*s)
 
 @testset verbose=true "POMP.jl" begin
+    ## plots.jl loads Plots, whose GR backend must be loaded before R's
+    ## graphics libraries (ggsave in the tests below) pull in the system
+    ## glib; the other order fails to load Glib_jll.
+    include("plots.jl")
     include("basic.jl")
     include("errors.jl")
     include("val_array.jl")
@@ -27,5 +31,8 @@ h2 = s -> crayon"!bold light_yellow"("- "*s)
     include("partrans.jl")
     include("perturb.jl")
     include("mif2.jl")
+    include("design.jl")
+    include("profile.jl")
+    include("mcap.jl")
     include("speed1.jl")
 end

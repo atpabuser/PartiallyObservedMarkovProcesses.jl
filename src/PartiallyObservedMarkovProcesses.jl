@@ -76,6 +76,18 @@ include("melt.jl")
 export logmeanexp
 include("logmeanexp.jl")
 
+export slice_design, profile_design, runif_design, sobol_design
+include("design.jl")
+
+export pfilter_loglik, slice, profile
+include("profile.jl")
+
+export mcap, MCAP
+include("mcap.jl")
+
+export sliceplot, sliceplot!, mcapplot, mcapplot!
+include("plots.jl")
+
 include("reshape.jl")
 
 export EulerMultinomial, rand, rand!
