@@ -550,7 +550,24 @@ mif2_run(
     ## states, consuming randomness before the loop and so offsetting
     ## the stream of every continuation relative to an equivalent single
     ## run. The first `rinit!` below, at n == 1, fills `xf` for real.
-    xf = Array{typeof(init_state(object))}(undef,Np,1)
+    ##
+    ## `init_state`'s declared type is `Empty` for a model that never
+    ## sets it (every genealogy filter in PhyloPOMP.jl, whose real
+    ## particle state -- node, coloring, compartment counts, ... -- has
+    ## no natural "reported state" to declare): `Empty` there is not the
+    ## true state type but the sentinel `rinit`/`pfilter` already use
+    ## (`rinit.jl`) to fall back to inferring it from one real call. The
+    ## fast path above skips exactly that call for an ordinary
+    ## (non-`Empty`) model, so this cost is paid only where the type is
+    ## otherwise unknowable: one single-particle `rinit` probe, not the
+    ## `Np`-particle draw the comment above rules out.
+    X0 = typeof(init_state(object))
+    xf = if X0 === Empty
+        probe = rinit(object;t0=t0_0,params=theta[1],nsim=1)
+        Array{eltype(probe)}(undef,Np,1)
+    else
+        Array{X0}(undef,Np,1)
+    end
     xp = similar(xf,1,Np,1)
     ell4 = Array{LogLik}(undef,1,Np,1,1)
     ybuf = Array{eltype(y)}(undef,1,Np,1)
@@ -609,7 +626,16 @@ mif2_run(
                 logLik(pfilter(object;Np=Np_monitor,params=thetabar))
                 for _ ∈ 1:Nmonitor
             ]
-            monitor_ll = logmeanexp(reps)
+            ## `summarize_loglik` (profile.jl), not a bare `logmeanexp`:
+            ## when every monitor replicate underflows to `-Inf`, raw
+            ## `logmeanexp` gives `NaN` (`-Inf - (-Inf)` is `NaN` inside
+            ## its own max-subtraction step), silently discarding the
+            ## information that the likelihood is zero there, not
+            ## undefined. `summarize_loglik` matches R phylopomp's
+            ## `mtbd2_loglik` convention instead: drop isolated
+            ## non-finite replicates as filter degeneracy, but report
+            ## `-Inf` cleanly when none are finite.
+            monitor_ll = summarize_loglik(reps).loglik
         end
         ## `monitor_logLik` is present in every trace row, and is `NaN`
         ## when monitoring is off. Emitting it conditionally would make
@@ -623,8 +649,24 @@ mif2_run(
     thetafinal = inverse_transform(estbar)
     paramcloud,estcloud = final_clouds(kernel,theta,est,transform,inverse_transform)
 
+    ## For an `Empty`-declared model, `xf` was allocated from a one-off
+    ## probe (above) rather than the model's own declared type, so every
+    ## call -- continuation included -- paid that probe's one extra
+    ## `rinit` draw, offsetting a split run's random stream relative to
+    ## an equivalent direct run. Once the loop has actually run, `xf`
+    ## holds real, correctly-drawn filtered states (the probe's own
+    ## draws were long since overwritten by the loop's first `rinit!`),
+    ## so declaring the *returned* object's `init_state` from one of
+    ## them lets a later continuation see a properly-typed model and
+    ## skip the probe entirely -- paying the extra draw once per
+    ## lineage, not once per call, and restoring the same bit-exactness
+    ## `Empty`-state models get everywhere else. `Nmif == 0` never
+    ## touches `xf` past its initial `undef` allocation, so it is
+    ## excluded to avoid reading an unwritten slot.
+    x0final = (X0 === Empty && Nmif > 0) ? xf[1,1] : missing
+
     Mif2dPompObject(
-        pomp(object;params=thetafinal),
+        pomp(object;params=thetafinal,init_state=x0final),
         m0+Nmif,Np,
         rw_sd,rw_sd_init,
         schedule,cooling_type,α,trig,targ,
