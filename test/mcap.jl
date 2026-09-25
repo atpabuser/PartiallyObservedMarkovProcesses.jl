@@ -129,7 +129,22 @@ using Test
         ## a convex set of points gives no standard errors, with a warning
         mc = @test_logs (:warn,r"not concave") mcap(-ll,par)
         @test isnan(mc.se_stat) && isnan(mc.se)
-        @test all(isnan,mc.ci) || mc.ci[1] ≤ mc.ci[2]
+        @test all(isnan,mc.ci)
+    end
+
+    @testset "mcap does not depend on the units of the parameter" begin
+        x = collect(range(1.0,3.0,length=40))
+        y = -5 .* (x .- 2.1).^2 .+ 0.3 .* sin.(1:40)
+        m1 = mcap(y,x)
+        for c ∈ (1e-8,1e8)
+            mc = mcap(y,c .* x)
+            @test collect(mc.ci) ./ c ≈ collect(m1.ci) rtol=1e-8
+            @test mc.mle/c ≈ m1.mle rtol=1e-8
+            @test mc.se/c ≈ m1.se rtol=1e-6
+            @test mc.se_mc/c ≈ m1.se_mc rtol=1e-6
+            @test mc.delta ≈ m1.delta rtol=1e-6
+            @test mc.coefs.a*c^2 ≈ m1.coefs.a rtol=1e-6
+        end
     end
 
 end

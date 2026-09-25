@@ -38,6 +38,30 @@ using Test
         @test all(cond_logLik(Wk) .≈ -1.234)
     end
 
+    ## one tempered resampling step (target β): ancestors are drawn with
+    ## probability q ∝ w^(1-β), systematically, so particle i has
+    ## floor(n q_i) or ceil(n q_i) copies; each copy keeps weight ∝ w^β;
+    ## and the log likelihood gains log((S/n) Σⱼ w_{A_j}^β), S = Σ w^(1-β)
+    Random.seed!(11)
+    n = 500
+    w0 = rand(n).^4
+    w0 ./= sum(w0)
+    for β ∈ (0.0,0.3,0.7)
+        q = w0.^(1-β)
+        q ./= sum(q)
+        p = zeros(Int,n); w = copy(w0); work = similar(w0); ll = fill(0.0)
+        POMP.systematic_resample!(p,w,work,ll,β)
+        counts = [count(==(i),p) for i ∈ 1:n]
+        @test all(floor.(n .* q) .- 1e-9 .≤ counts .≤ ceil.(n .* q) .+ 1e-9)
+        r = w0[p].^β
+        @test w ≈ r ./ sum(r)
+        @test ll[] ≈ log(sum(r)*sum(w0.^(1-β))/n) atol=1e-12
+    end
+    ## through `pfilter`: with target > 0 the final weights are not uniform
+    Random.seed!(12)
+    @test all(pfilter(P;Np=200,params=p1,trigger=1.0,target=0.0).weights .≈ 1/200)
+    @test !all(pfilter(P;Np=200,params=p1,trigger=1.0,target=0.5).weights .≈ 1/200)
+
     ## a degenerate filter: every particle impossible
     Pdeg = pomp(P;logdmeasure=function (;_...) -Inf end)
     Wd = pfilter(Pdeg;Np=100,params=p1,trigger=0.5,target=0.5)

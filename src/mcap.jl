@@ -1,18 +1,10 @@
 import DataFrames: DataFrame
 import Distributions: Chisq, quantile
-import LinearAlgebra: dot, SingularException
+import LinearAlgebra: dot, qr, UpperTriangular, SingularException
 
-## A local-regression smoother matching R's `loess` with
-## `degree = 2`, `family = "gaussian"`, and `surface = "direct"` for one
-## predictor: at each evaluation point the `q = floor(span*n)` nearest
-## observations receive tricube weights in their distance to that point,
-## scaled by the distance of the `q`-th nearest, and a weighted quadratic
-## is fitted. For `span > 1` all observations are used and the bandwidth
-## is the largest distance times `sqrt(span)` (what R's C code does for
-## one predictor, checked numerically against R). R's default `surface =
-## "interpolate"` blends exact fits at the vertices of a k-d tree and
-## differs from this direct evaluation at the fourth or fifth
-## significant figure.
+## Local quadratic regression, as R's `loess(degree = 2, surface =
+## "direct")` with one predictor.  For `span > 1` the bandwidth is the
+## largest distance times `sqrt(span)`, as in R.
 struct Loess
     x::Vector{Float64}
     y::Vector{Float64}
@@ -20,13 +12,11 @@ struct Loess
 end
 
 loess(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}; span::Real = 0.75) = begin
-    length(x) == length(y) || error("`loess`: `x` and `y` must have the same length.")
-    length(x) ≥ 3 || error("`loess`: at least three observations are needed.")
-    span > 0 || error("`loess`: `span` must be positive.")
-    all(isfinite,x) && all(isfinite,y) ||
-        error("`loess`: `x` and `y` must be finite.")
-    (span > 1 || floor(Int,span*length(x)) ≥ 3) ||
-        error("`loess`: `span*n` must be at least 3.")
+    @assert length(x) == length(y) "`x` and `y` must have the same length"
+    @assert length(x) ≥ 3 "at least three observations are needed"
+    @assert span > 0 "`span` must be positive"
+    @assert all(isfinite,x) && all(isfinite,y) "`x` and `y` must be finite"
+    @assert span > 1 || floor(Int,span*length(x)) ≥ 3 "`span*n` must be at least 3"
     Loess(collect(Float64,x),collect(Float64,y),Float64(span))
 end
 
@@ -39,10 +29,11 @@ end
     else
         maximum(d)*sqrt(span)
     end
-    h > 0 || error("`loess`: zero bandwidth at $x0; the data have too few distinct `x` values.")
+    @assert h > 0 "zero bandwidth at $x0: too few distinct `x` values"
     w = @. ifelse(d < h, (1-(d/h)^3)^3, 0.0)
-    u = x .- x0
-    ## weighted quadratic: predict the intercept
+    ## weighted quadratic in (x-x0)/h: its intercept is the prediction,
+    ## and the scaling keeps it well conditioned whatever the units of x
+    u = (x .- x0)./h
     X = hcat(ones(n),u,u.^2)
     sw = sqrt.(w)
     β = (sw .* X) \ (sw .* y)
@@ -52,34 +43,35 @@ end
 """
     MCAP
 
-The result of a [`mcap`](@ref) computation. Fields:
-- `logLik`, `parameter`: the input points.
-- `level`, `span`: the settings used.
-- `fit`: a `DataFrame` with columns `parameter` (the evaluation grid),
-  `smoothed` (the local-regression smooth), and `quadratic` (the
-  weighted quadratic fit).
-- `mle`: the maximizer of the smooth over the grid.
-- `quadratic_max`: the maximizer of the quadratic fit.
-- `ci`: the Monte Carlo adjusted confidence interval, as a tuple.
-- `delta`: the adjusted log-likelihood cutoff defining `ci`.
-- `se_stat`, `se_mc`, `se`: the statistical, Monte Carlo, and total
-  standard errors of the point estimate.
-- `coefs`: the quadratic fit `c + b*parameter - a*parameter^2` as
-  `(c=..., a=..., b=...)`.
+Created by a call to [`mcap`](@ref), this struct holds the Monte Carlo
+adjusted profile.
 """
 struct MCAP
+    "profile log likelihoods"
     logLik::Vector{Float64}
+    "profiled parameter values"
     parameter::Vector{Float64}
+    "confidence level"
     level::Float64
+    "smoothing span"
     span::Float64
+    "evaluation grid, with the smoothed and quadratic fits"
     fit::DataFrame
+    "maximizer of the smoothed profile"
     mle::Float64
+    "maximizer of the quadratic fit"
     quadratic_max::Float64
+    "Monte Carlo adjusted confidence interval"
     ci::Tuple{Float64,Float64}
+    "log-likelihood cutoff defining the interval"
     delta::Float64
+    "statistical standard error"
     se_stat::Float64
+    "Monte Carlo standard error"
     se_mc::Float64
+    "total standard error"
     se::Float64
+    "quadratic fit c + b*parameter - a*parameter^2"
     coefs::NamedTuple{(:c,:a,:b),NTuple{3,Float64}}
 end
 
@@ -88,78 +80,60 @@ Base.show(io::IO, m::MCAP) = begin
 end
 
 """
-    mcap(logLik, parameter; level = 0.95, span = 0.75, Ngrid = 1000)
+    mcap(loglik, parameter; level = 0.95, span = 0.75, Ngrid = 1000)
 
-Monte Carlo adjusted profile, a port of R `pomp`'s `mcap` (Ionides et
-al. 2017). `logLik` and `parameter` are vectors of profile
-log-likelihood estimates and the parameter values at which they were
-obtained, typically the `loglik` column and the profiled column of the
-data frame returned by [`profile`](@ref).
-
-The points are smoothed by local quadratic regression with the given
-`span`; the maximizer of the smooth over a grid of `Ngrid` points is the
-point estimate `mle`. A weighted quadratic is then fitted around that
-maximizer, from which the statistical standard error (from the
-curvature) and the Monte Carlo standard error (from the coefficient
-covariance) are obtained. The confidence interval at the given `level`
-is the set of grid points at which the smooth lies within `delta` of
-its maximum, where `delta` is the chi-square cutoff inflated for the
-Monte Carlo error. Returns an [`MCAP`](@ref).
-
-The smoother evaluates the local fit directly at every grid point,
-which corresponds to R's `loess` with `surface = "direct"`; R's default
-interpolating surface differs from it at the fourth or fifth significant
-figure.
+Monte Carlo adjusted profile (Ionides et al. 2017), as R `pomp`'s
+`mcap`.  `loglik` and `parameter` are typically the `loglik` column
+and the profiled column returned by [`profile`](@ref).  Returns an
+[`MCAP`](@ref).  The smoother corresponds to R's `loess` with
+`surface = "direct"`, which differs slightly from R's default.
 """
 mcap(
-    logLik::AbstractVector{<:Real},
+    loglik::AbstractVector{<:Real},
     parameter::AbstractVector{<:Real};
     level::Real = 0.95,
     span::Real = 0.75,
     Ngrid::Integer = 1000,
 ) = begin
-    ll = collect(Float64,logLik)
+    ll = collect(Float64,loglik)
     par = collect(Float64,parameter)
     n = length(ll)
-    n == length(par) || error("`mcap`: `logLik` and `parameter` must have the same length.")
-    all(isfinite,ll) ||
-        error("`mcap`: `logLik` must be finite; drop the non-finite points first.")
-    all(isfinite,par) || error("`mcap`: `parameter` must be finite.")
-    0 < level < 1 || error("`mcap`: `level` must lie in (0,1).")
-    Ngrid ≥ 2 || error("`mcap`: `Ngrid` must be at least 2.")
-    trunc(Int,span*n) ≥ 1 ||
-        error("`mcap`: `span*length(parameter)` must be at least 1.")
+    @assert n == length(par) "`loglik` and `parameter` must have the same length"
+    @assert all(isfinite,ll) "`loglik` must be finite"
+    @assert all(isfinite,par) "`parameter` must be finite"
+    @assert 0 < level < 1 "`level` must lie in (0,1)"
+    @assert Ngrid ≥ 2 "`Ngrid` must be at least 2"
+    @assert trunc(Int,span*n) ≥ 1 "`span*length(parameter)` must be at least 1"
     smooth_fit = loess(par,ll;span)
     grid = collect(range(minimum(par),maximum(par),length=Ngrid))
     smoothed = smooth_fit.(grid)
     smooth_arg_max = grid[argmax(smoothed)]
     dist = abs.(par .- smooth_arg_max)
     included = dist .< sort(dist)[trunc(Int,span*n)]
-    any(included) ||
-        error("`mcap`: no points fall inside the quadratic fitting window; increase `span`.")
+    @assert any(included) "no points fall inside the quadratic fitting window; increase `span`"
     maxdist = maximum(dist[included])
     w = zeros(Float64,n)
     w[included] .= (1 .- (dist[included]./maxdist).^3).^3
-    ## weighted least squares: logLik ~ 1 + a + b, with a = -parameter^2, b = parameter
-    X = hcat(ones(n),-par.^2,par)
+    ## weighted least squares, ll ~ c - a*z^2 + b*z, in the standardized
+    ## parameter z = (parameter-m)/s; results are converted back below
+    m = (maximum(par)+minimum(par))/2
+    s = (maximum(par)-minimum(par))/2
+    z = (par .- m)./s
+    X = hcat(ones(n),-z.^2,z)
     sw = sqrt.(w)
-    β = (sw .* X) \ (sw .* ll)
+    F = qr(sw .* X)
+    β = F \ (sw .* ll)
     c, a, b = β
     r = ll .- X*β
     nnz = count(>(0),w)
-    ## as R's `lm`: with no residual degrees of freedom the variance is
-    ## undefined and the standard errors and interval come out NaN. The
-    ## Gram matrix `X'*(w.*X)` can be exactly or near-exactly singular
-    ## with few weighted points, or with weighted points that carry too
-    ## little spread in `parameter` to pin down a quadratic -- `nnz > 3`
-    ## catches the former; `inv` throwing (rather than silently
-    ## returning non-finite entries) is the general safety net for both,
-    ## including cases `nnz` alone would miss.
+    ## as R's `lm`: no residual degrees of freedom, or a singular
+    ## design, leaves the standard errors undefined (NaN)
     nnz > 3 || @warn "`mcap`: only $nnz points carry weight in the quadratic fit; increase `span` or add points."
     var_a,var_b,cov_ab = if nnz > 3
         try
             σ2 = dot(w,r.^2)/(nnz-3)
-            V = σ2 .* inv(X'*(w .* X))
+            Ri = inv(UpperTriangular(F.R))
+            V = σ2 .* (Ri*Ri')
             V[2,2],V[3,3],V[2,3]
         catch e
             e isa Union{ArgumentError,SingularException} || rethrow()
@@ -169,6 +143,7 @@ mcap(
     else
         NaN,NaN,NaN
     end
+    ## standard errors in z units; `delta` is the same in any units
     se_mc_squared = (1/(4*a*a))*(var_b - (2*b/a)*cov_ab + (b*b/a/a)*var_a)
     se_stat_squared = 1/2/a
     se_total_squared = se_mc_squared + se_stat_squared
@@ -177,21 +152,19 @@ mcap(
     delta = quantile(Chisq(1),level)*(a*se_mc_squared + 0.5)
     logLik_diff = maximum(smoothed) .- smoothed
     inside = grid[logLik_diff .< delta]
-    ## `delta`'s chi-square cutoff is derived assuming a concave fit; a
-    ## non-concave one can still pass `logLik_diff .< delta` at every
-    ## grid point (a spuriously "whole-range" interval), which is not a
-    ## confidence interval in any defined sense, so it is not returned
-    ## as one -- matching the standard errors this same non-concavity
-    ## already nulls, above.
+    ## the cutoff assumes a concave fit; otherwise there is no interval
     ci = (concave && !isempty(inside)) ? (minimum(inside),maximum(inside)) : (NaN,NaN)
     ## as R: the square root of a negative variance is NaN
     nsqrt(v) = v ≥ 0 ? sqrt(v) : NaN
-    quadratic = c .+ b.*grid .- a.*grid.^2
+    zg = (grid .- m)./s
+    quadratic = c .+ b.*zg .- a.*zg.^2
     MCAP(
         ll,par,Float64(level),Float64(span),
         DataFrame(parameter=grid,smoothed=smoothed,quadratic=quadratic),
-        smooth_arg_max,b/(2*a),ci,delta,
-        nsqrt(se_stat_squared),nsqrt(se_mc_squared),nsqrt(se_total_squared),
-        (c=c,a=a,b=b),
+        smooth_arg_max,m+s*b/(2*a),ci,delta,
+        s*nsqrt(se_stat_squared),s*nsqrt(se_mc_squared),s*nsqrt(se_total_squared),
+        (c=c-b*m/s-a*m^2/s^2, a=a/s^2, b=b/s+2*a*m/s^2),
     )
 end
+
+mcap(_...) = error("Incorrect call to `mcap`.")

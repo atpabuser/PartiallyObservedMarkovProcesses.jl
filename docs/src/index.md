@@ -82,22 +82,12 @@ resampled
 
 ### Plotting
 
-Plot recipes are provided through `RecipesBase`; load `Plots` to use
-them. `plot(mf)` on a `mif` result (or on a vector of them) draws the
-convergence diagnostics that R `pomp`'s `plot` method draws: effective
-sample size and conditional log likelihood over time for the last
-iteration, then the log likelihood and each perturbed parameter against
-the iteration number. Pass `pars = (:a, :b)` to select parameters, and
-`monitor = df` (the output of `monitor`) to add the unperturbed log
-likelihood. `sliceplot(df)` plots the output of `slice`, one panel per
-sliced parameter. `mcapplot(m)` plots an `MCAP`: the points, the
-smooth, the quadratic fit, the point estimate, the confidence interval,
-and the cutoff.
-
-```@docs
-sliceplot
-mcapplot
-```
+Plots are drawn with AlgebraOfGraphics, through a package extension:
+load `AlgebraOfGraphics` and a Makie backend (e.g., `CairoMakie`) to use
+them.  Each function returns the drawn figure; additional arguments are
+passed to AlgebraOfGraphics' `draw`: `sliceplot` for the output of
+`slice`, `mcapplot` for an `MCAP`, and `traceplot` for `mif` results
+(see the Reference page).
 
 ### Trajectory matching
 

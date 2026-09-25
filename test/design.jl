@@ -1,4 +1,5 @@
 using PartiallyObservedMarkovProcesses
+import PartiallyObservedMarkovProcesses as POMP
 using DataFrames
 using Random
 using Test
@@ -38,6 +39,10 @@ using Test
         @test all(2.0 .≤ d.x0 .≤ 8.0)
         d2 = runif_design(lower,upper,50;rng=MersenneTwister(1))
         @test d == d2
+        ## the draws themselves, column by column from the same stream
+        rng = MersenneTwister(1)
+        @test d.k == 3.0 .+ 7.0 .* rand(rng,50)
+        @test d.x0 == 2.0 .+ 6.0 .* rand(rng,50)
         ## names may be given in a different order in `upper`
         d3 = runif_design(lower,(x0=8.0,k=10.0),5;rng=MersenneTwister(2))
         @test propertynames(d3) == [:k,:x0]
@@ -63,6 +68,19 @@ using Test
             q = [count(v -> lo+(j-1)*(hi-lo)/4 ≤ v < lo+j*(hi-lo)/4,d[!,c]) for j ∈ 1:4]
             @test all(14 .≤ q .≤ 18)
         end
+        ## jointly, not only margin by margin: each cell of a 4×4 grid on
+        ## the box holds 3 to 5 of the 64 points
+        cell(v,lo,hi) = min(4,1+floor(Int,4*(v-lo)/(hi-lo)))
+        C = zeros(Int,4,4)
+        for r ∈ eachrow(d)
+            C[cell(r.k,3.0,10.0),cell(r.x0,2.0,8.0)] += 1
+        end
+        @test all(3 .≤ C .≤ 5)
+        ## the points are those of the Sobol' sequence, scaled to the box
+        s = POMP.SobolSeq(2)
+        pts = [copy(POMP.next!(s,zeros(2))) for _ ∈ 1:64]
+        @test d.k ≈ 3.0 .+ 7.0 .* first.(pts)
+        @test d.x0 ≈ 2.0 .+ 6.0 .* last.(pts)
         @test nrow(sobol_design((a=0.0,),(a=1.0,),0)) == 0
     end
 

@@ -70,6 +70,14 @@ using Test
         @test monitor(A;Np=100,seed=1).iteration == traces(A).iteration == 1:5
         @test_throws r"every" monitor(A;Np=100,seed=1,every=0)
         @test_throws r"no `mif` results" monitor(POMP.MifdPompObject[];Np=100,seed=1)
+        ## each point is evaluated under the model of the run that recorded
+        ## it: log densities -1 then -2 at each of 3 times give exactly -3, -6
+        Q = pomp([(y=0.0,) for _ ∈ 1:3]; t0=0.0, times=[1.0,2.0,3.0], params=(a=1.0,),
+            rinit=(;_...)->(x=0.0,), rprocess=discrete_time((;x,_...)->(x=x,),dt=1.0),
+            logdmeasure=(;_...)->-1.0)
+        C = mif(Q;Np=10,Nmif=2,perturbations=@perturbn(@lognormal(a,0.01)),cooling=geometric_cooling(0.5))
+        D = mif(C;Nmif=2,logdmeasure=(;_...)->-2.0)
+        @test monitor([C,D];Np=10,seed=1).loglik == [-3.0,-3.0,-3.0,-6.0,-6.0]
     end
 
 end

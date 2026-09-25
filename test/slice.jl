@@ -3,6 +3,7 @@ import PartiallyObservedMarkovProcesses as POMP
 using DataFrames
 using Distributions
 using Random
+using Statistics: std
 using Test
 
 @info h1("slice tests")
@@ -58,11 +59,29 @@ using Test
             (POMP.summarize_loglik([-Inf,-Inf]).loglik == -Inf &&
              isnan(POMP.summarize_loglik([-Inf,-Inf]).se) &&
              POMP.summarize_loglik([-Inf,-Inf]).ess == 0)
-        ## non-finite replicates are dropped
+        ## a replicate at -Inf is an estimate of zero and is kept
         s = POMP.summarize_loglik([-Inf,-10.0,-12.0])
-        @test s.loglik == logmeanexp([-10.0,-12.0])
-        @test s.ess == logmeanexp([-10.0,-12.0];ess=true).ess
+        @test s.loglik == logmeanexp([-Inf,-10.0,-12.0])
+        @test s.loglik < logmeanexp([-10.0,-12.0])
+        @test s.ess == logmeanexp([-Inf,-10.0,-12.0];ess=true).ess
         @test_throws r"nreps" pfilter_loglik(P;Np=10,nreps=0)
+    end
+
+    @testset "pfilter_loglik is unbiased when some replicates are -Inf" begin
+        ## Frozen binary state X ~ Bernoulli(1/2), with g₁ = (0.2,1.8) and
+        ## g₂ = (0,1) at X = (0,1): exact likelihood 0.9, and with Np = 2
+        ## about a quarter of the replicates are exactly zero.  Dropping
+        ## them gave a mean of 1.20.
+        Random.seed!(5)
+        Pz = pomp(
+            [(y=0.0,),(y=0.0,)];
+            t0=0.0, times=[1.0,2.0], params=(dummy=0.0,),
+            rinit=(;_...) -> (x = rand() < 0.5 ? 1.0 : 0.0,),
+            rprocess=discrete_time((;x,_...) -> (x=x,),dt=1.0),
+            logdmeasure=(;t,x,_...) -> t == 1 ? log(x == 1 ? 1.8 : 0.2) : log(x == 1 ? 1.0 : 0.0),
+        )
+        z = [exp(pfilter_loglik(Pz;Np=2,nreps=10).loglik) for _ ∈ 1:5000]
+        @test abs(sum(z)/length(z)-0.9) < 5*std(z)/sqrt(length(z))
     end
 
     @testset "slice" begin
