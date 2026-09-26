@@ -2,8 +2,8 @@ import DataFrames: DataFrame
 import Distributions: Chisq, quantile
 import LinearAlgebra: dot, qr, UpperTriangular, SingularException
 
-## Local quadratic regression, as R's `loess(degree = 2, surface =
-## "direct")` with one predictor.  For `span > 1` the bandwidth is the
+# Weighted quadratic in (x-x0)/h. The intercept is the prediction;
+# scaling by h keeps the fit insensitive to the units of x.
 ## largest distance times `sqrt(span)`, as in R.
 struct Loess
     x::Vector{Float64}
@@ -57,7 +57,7 @@ struct MCAP
     span::Float64
     "evaluation grid, with the smoothed and quadratic fits"
     fit::DataFrame
-    "maximizer of the smoothed profile"
+    "grid maximizer of the smoothed profile"
     mle::Float64
     "maximizer of the quadratic fit"
     quadratic_max::Float64
@@ -126,8 +126,8 @@ mcap(
     c, a, b = β
     r = ll .- X*β
     nnz = count(>(0),w)
-    ## as R's `lm`: no residual degrees of freedom, or a singular
-    ## design, leaves the standard errors undefined (NaN)
+    # With no residual degrees of freedom or a singular design,
+    # the standard errors are undefined.
     nnz > 3 || @warn "`mcap`: only $nnz points carry weight in the quadratic fit; increase `span` or add points."
     var_a,var_b,cov_ab = if nnz > 3
         try
