@@ -86,8 +86,9 @@ Plots are drawn with AlgebraOfGraphics, through a package extension:
 load `AlgebraOfGraphics` and a Makie backend (e.g., `CairoMakie`) to use
 them.  Each function returns the drawn figure; additional arguments are
 passed to AlgebraOfGraphics' `draw`: `sliceplot` for the output of
-`slice`, `mcapplot` for an `MCAP`, and `traceplot` for `mif` results
-(see the Reference page).
+`slice`, `mcapplot` for an `MCAP`, `traceplot` for `mif` results, and
+`filterplot` for the effective sample size and conditional log
+likelihood of `pfilter` or `mif` results (see the Reference page).
 
 ### Trajectory matching
 

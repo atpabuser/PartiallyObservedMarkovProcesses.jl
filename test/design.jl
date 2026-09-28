@@ -22,11 +22,14 @@ using Test
         @test d.k[4:5] == [3.0,9.0]
         @test all(d.a[4:5] .== 1.5)
         @test eltype(d.a) == Float64
-        ## a scalar slice value is accepted
+        # a scalar slice value is accepted
         @test nrow(slice_design(center; a=2.0)) == 1
         @test_throws r"does not appear in `center`" slice_design(center; bogus=1:3)
         @test_throws r"at least one slice" slice_design(center)
         @test_throws r"real numbers" slice_design((a=1.0,b="x"); a=1:2)
+        # names used for output columns cannot be parameters
+        @test_throws r"`se` is reserved" slice_design((a=1.0,se=2.0); a=1:2)
+        @test_throws r"`slice` is reserved" slice_design((a=1.0,slice=2.0); a=1:2)
     end
 
     @testset "runif_design" begin
@@ -39,11 +42,11 @@ using Test
         @test all(2.0 .≤ d.x0 .≤ 8.0)
         d2 = runif_design(lower,upper,50;rng=MersenneTwister(1))
         @test d == d2
-        ## the draws themselves, column by column from the same stream
+        # the draws themselves, column by column from the same stream
         rng = MersenneTwister(1)
         @test d.k == 3.0 .+ 7.0 .* rand(rng,50)
         @test d.x0 == 2.0 .+ 6.0 .* rand(rng,50)
-        ## names may be given in a different order in `upper`
+        # names may be given in a different order in `upper`
         d3 = runif_design(lower,(x0=8.0,k=10.0),5;rng=MersenneTwister(2))
         @test propertynames(d3) == [:k,:x0]
         @test nrow(runif_design(lower,upper,0)) == 0
@@ -60,23 +63,23 @@ using Test
         @test all(3.0 .≤ d.k .≤ 10.0)
         @test all(2.0 .≤ d.x0 .≤ 8.0)
         @test d == sobol_design(lower,upper,64)
-        ## low discrepancy: every quarter of each range gets about a quarter
-        ## of the points (the sequence skips its initial zero point, so the
-        ## first 64 points are not an exact balanced block)
+        # low discrepancy: every quarter of each range gets about a quarter
+        # of the points (the sequence skips its initial zero point, so the
+        # first 64 points are not an exact balanced block)
         for c ∈ (:k,:x0)
             lo, hi = lower[c], upper[c]
             q = [count(v -> lo+(j-1)*(hi-lo)/4 ≤ v < lo+j*(hi-lo)/4,d[!,c]) for j ∈ 1:4]
             @test all(14 .≤ q .≤ 18)
         end
-        ## jointly, not only margin by margin: each cell of a 4×4 grid on
-        ## the box holds 3 to 5 of the 64 points
+        # jointly, not only margin by margin: each cell of a 4×4 grid on
+        # the box holds 3 to 5 of the 64 points
         cell(v,lo,hi) = min(4,1+floor(Int,4*(v-lo)/(hi-lo)))
         C = zeros(Int,4,4)
         for r ∈ eachrow(d)
             C[cell(r.k,3.0,10.0),cell(r.x0,2.0,8.0)] += 1
         end
         @test all(3 .≤ C .≤ 5)
-        ## the points are those of the Sobol' sequence, scaled to the box
+        # the points are those of the Sobol' sequence, scaled to the box
         s = POMP.SobolSeq(2)
         pts = [copy(POMP.next!(s,zeros(2))) for _ ∈ 1:64]
         @test d.k ≈ 3.0 .+ 7.0 .* first.(pts)
@@ -93,7 +96,7 @@ using Test
         @test d.a == repeat([1.0,1.5,2.0],inner=4)
         @test all(3.0 .≤ d.k .≤ 10.0)
         @test metadata(d,"profiled") == [:a]
-        ## two profiled variables: full grid, the first varying fastest
+        # two profiled variables: full grid, the first varying fastest
         d2 = profile_design(a=[1.0,2.0],b=[10.0,20.0,30.0];lower,upper,nprof=2,type=:sobol)
         @test size(d2) == (12,4)
         @test d2.a == repeat([1.0,2.0,1.0,2.0,1.0,2.0],inner=2)
@@ -104,6 +107,8 @@ using Test
         @test_throws r"nprof" profile_design(a=[1.0];lower,upper,nprof=0)
         @test_throws r"type" profile_design(a=[1.0];lower,upper,nprof=1,type=:bogus)
         @test_throws r"must not appear in `lower`" profile_design(k=[1.0];lower,upper,nprof=1)
+        @test_throws r"`slice` is reserved" profile_design(slice=[2.0,3.0];lower,upper,nprof=1)
+        @test_throws r"`loglik` is reserved" profile_design(a=[1.0];lower=(loglik=0.0,),upper=(loglik=1.0,),nprof=1)
     end
 
 end

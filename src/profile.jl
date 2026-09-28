@@ -28,9 +28,9 @@ pfilter_loglik(_...) = error("Incorrect call to `pfilter_loglik`.")
 
 # A -Inf replicate represents a zero likelihood estimate and must be kept.
 # Dropping it biases the likelihood average upward.
-
 summarize_loglik(lls::AbstractVector{<:Real}) = begin
-    if !any(isfinite,lls)
+    @assert !any(isnan,lls) && !any(==(Inf),lls) "invalid NaN or +∞ log likelihood"
+    if all(==(-Inf),lls)
         (loglik=-Inf,se=NaN,ess=0.0)
     elseif length(lls) == 1
         (loglik=Float64(lls[1]),se=NaN,ess=1.0)
@@ -42,10 +42,15 @@ end
 
 # Override the object's parameters with the values in one design row.
 # Every design column except `slice` must name a model parameter.
-
 design_params(object::AbstractPompObject, row::DataFrameRow) = begin
     base = coef(object)
+    for p ∈ keys(base)
+        @assert p ∉ RESERVED_NAMES "parameter name `$p` is reserved: `slice`, `loglik`, `se`, and `ess` cannot be parameter names"
+    end
     cols = filter(c -> c != :slice, propertynames(row))
+    for c ∈ cols
+        @assert c ∉ RESERVED_NAMES "design column `$c` is reserved for output"
+    end
     if !isempty(base)
         bad = filter(c -> c ∉ keys(base), cols)
         @assert isempty(bad) "design column(s) $(join(map(string,bad),", ")) are not parameters of the model"
@@ -68,7 +73,8 @@ Likelihood slice.  Estimates the log likelihood by
 [`pfilter_loglik`](@ref) at each row of `design` (typically from
 [`slice_design`](@ref)), whose columns override the parameters of
 `object`.  Returns `design` with `loglik`, `se`, and `ess` columns
-appended.  Additional arguments are passed to `pfilter`.
+appended, so these, and `slice`, cannot be parameter names.
+Additional arguments are passed to `pfilter`.
 """
 slice(
     object::AbstractPompObject,
@@ -89,10 +95,10 @@ end
 
 slice(_...) = error("Incorrect call to `slice`.")
 
-## The names of the parameters perturbed by a `mif` perturbations
-## function, read from what it returns for each parameter set in `ps` at
-## every lag `mif` uses (0 through `nlags`).  The state of the
-## random-number generator is restored, so the fit is unchanged.
+# The names of the parameters perturbed by a `mif` perturbations
+# function, read from what it returns for each parameter set in `ps` at
+# every lag `mif` uses (0 through `nlags`).  The state of the
+# random-number generator is restored, so the fit is unchanged.
 perturbed_names(
     perturbations::Function,
     ps::AbstractVector{<:NamedTuple},
@@ -108,9 +114,9 @@ perturbed_names(
     Tuple(names)
 end
 
-## `perturbations`, checked at every call `mif` makes: any parameter it
-## changes must be one of `perturbed`.  Probing cannot establish this
-## for every function, e.g., one that depends on the cooling scale.
+# `perturbations`, checked at every call `mif` makes: any parameter it
+# changes must be one of `perturbed`.  Probing cannot establish this
+# for every function, e.g., one that depends on the cooling scale.
 guarded(perturbations::Function, perturbed::Tuple) =
     function (scale, lag; params...)
         ptb = perturbations(scale,lag;params...)
@@ -127,11 +133,13 @@ guarded(perturbations::Function, perturbed::Tuple) =
 Profile likelihood.  From each row of `design` (typically from
 [`profile_design`](@ref)), runs [`mif`](@ref), then estimates the log
 likelihood at the resulting estimate by [`pfilter_loglik`](@ref) with
-`Np_eval` particles and `nreps` replicates.  Parameters not perturbed by
+`Np_eval` particles and `nreps` replicates, using the model and the
+resampling settings (`trigger`, `target`) that `mif` used.  Parameters not perturbed by
 `perturbations` keep their values from the row; perturbing a parameter
 named as profiled by `profile_design` is an error.  Additional
 arguments are passed to `mif`.  Returns a `DataFrame` of parameters
-with `loglik`, `se`, and `ess` columns, suitable for [`mcap`](@ref).
+with `loglik`, `se`, and `ess` columns, suitable for [`mcap`](@ref); as
+for [`slice`](@ref), these names are reserved.
 """
 profile(
     object::AbstractPompObject,
@@ -158,12 +166,14 @@ profile(
     res = Vector{LoglikSummary}(undef,n)
     flexmap!(1:n) do i
         mf = mif(object;Nmif,Np,perturbations=guarded(perturbations,perturbed),cooling,params=ps[i],kwargs...)
-        ## unperturbed parameters keep their exact values: the swarm
-        ## average of a constant need not return that constant
+        # unperturbed parameters keep their exact values: the swarm
+        # average of a constant need not return that constant
         est = coef(mf)
         θ = merge(ps[i],NamedTuple{perturbed}(Tuple(getfield(est,p) for p ∈ perturbed)))
         ests[i] = θ
-        res[i] = pfilter_loglik(pomp(mf);Np=Np_eval,nreps,params=θ)
+        # evaluate with the model and resampling settings (`trigger`,
+        # `target`) that `mif` used, including any given in `kwargs`
+        res[i] = pfilter_loglik(mf;Np=Np_eval,nreps,params=θ)
     end
     out = DataFrame(design;copycols=true)
     for p ∈ keys(ps[1])

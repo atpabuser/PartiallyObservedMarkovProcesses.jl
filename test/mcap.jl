@@ -26,9 +26,9 @@ using Test
         """
         @rget sm_direct sm_default
         @test maximum(abs.(sm .- sm_direct)) < 1e-10
-        ## R's default interpolating surface differs only slightly
+        # R's default interpolating surface differs only slightly
         @test maximum(abs.(sm .- sm_default)) < 0.05
-        ## span > 1 uses every point with an inflated bandwidth
+        # span > 1 uses every point with an inflated bandwidth
         fit2 = POMP.loess(par,ll;span=1.5)
         R"""
         f2 <- loess(ll ~ par, span=1.5, control=loess.control(surface="direct"))
@@ -42,8 +42,8 @@ using Test
     end
 
     @testset "mcap against R pomp::mcap (direct surface)" begin
-        ## pomp::mcap with its loess call switched to the direct surface,
-        ## which is what the Julia port computes; everything else verbatim.
+        # pomp::mcap with its loess call switched to the direct surface,
+        # which is what the Julia port computes; everything else verbatim.
         R"""
         library(pomp)
         mcap_direct <- function (logLik, parameter, level = 0.95, span = 0.75, Ngrid = 1000) {
@@ -95,7 +95,7 @@ using Test
         @test m.fit.quadratic ≈ m.coefs.c .+ m.coefs.b .* grid .- m.coefs.a .* grid.^2
         @test m.level == 0.95 && m.span == 0.75
         @test m.logLik == ll && m.parameter == par
-        ## and close to pomp::mcap as shipped (interpolating surface)
+        # and close to pomp::mcap as shipped (interpolating surface)
         step = grid[2]-grid[1]
         @test abs(m.mle - mp[:mle]) ≤ 10*step
         @test abs(m.ci[1] - mp[:ci][1]) ≤ 10*step
@@ -103,7 +103,7 @@ using Test
         @test m.se_stat ≈ mp[:se_stat] rtol=0.01
         @test m.se_mc ≈ mp[:se_mc] rtol=0.01
         @test m.delta ≈ mp[:delta] rtol=0.01
-        ## the interval brackets the truth and the estimate
+        # the interval brackets the truth and the estimate
         @test m.ci[1] < 2.1 < m.ci[2]
         @test m.ci[1] ≤ m.mle ≤ m.ci[2]
         @test m.se ≈ sqrt(m.se_stat^2+m.se_mc^2)
@@ -115,21 +115,31 @@ using Test
         @test m1.level == 0.9 && nrow(m1.fit) == 200
         m2 = mcap(ll,par;level=0.99)
         @test m2.ci[2]-m2.ci[1] > mcap(ll,par;level=0.9).ci[2]-mcap(ll,par;level=0.9).ci[1]
-        ## integer inputs are accepted
+        # integer inputs are accepted
         @test mcap(round.(Int,10 .* ll),round.(Int,10 .* par);span=1.0) isa MCAP
         @test_throws r"same length" mcap(ll,par[1:10])
         @test_throws r"finite" mcap(vcat(ll[1:end-1],-Inf),par)
         @test_throws r"level" mcap(ll,par;level=1.0)
         @test_throws r"Ngrid" mcap(ll,par;Ngrid=1)
         @test_throws r"span\*length" mcap(ll,par;span=0.01)
-        ## too few points in the quadratic window: NaN results, with a warning
+        # the quadratic fitting window needs span ≤ 1
+        @test_throws r"\(0,1\]" mcap(ll,par;span=1.5)
+        # too few points in the quadratic window: NaN results, with a warning
         few = @test_logs (:warn,r"carry weight") match_mode=:any mcap(ll[1:5],par[1:5];span=1.0)
         @test isnan(few.se) && all(isnan,few.ci)
         @test isfinite(few.mle)
-        ## a convex set of points gives no standard errors, with a warning
+        # a convex set of points gives no standard errors, with a warning
         mc = @test_logs (:warn,r"not concave") mcap(-ll,par)
         @test isnan(mc.se_stat) && isnan(mc.se)
         @test all(isnan,mc.ci)
+        # a nonconcave fit whose total variance nonetheless comes out
+        # positive (R reports se ≈ 0.171 and a negative cutoff here):
+        # every uncertainty output is NaN, the fit itself is kept
+        x = collect(range(1.0,3.0,length=40))
+        mn = @test_logs (:warn,r"not concave") match_mode=:any mcap((x .- 2.1).^2 .+ 10 .* sin.(1:40),x)
+        @test mn.coefs.a < 0 && isfinite(mn.mle)
+        @test isnan(mn.se_stat) && isnan(mn.se_mc) && isnan(mn.se)
+        @test isnan(mn.delta) && isnan(mn.quadratic_max) && all(isnan,mn.ci)
     end
 
     @testset "mcap does not depend on the units of the parameter" begin

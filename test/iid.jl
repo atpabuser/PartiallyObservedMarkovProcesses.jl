@@ -55,8 +55,8 @@ using Test
     ll = logmeanexp([logLik(pfilter(P,Np=10000,params=p1,trigger=0.3,target=0.1)) for _ in 1:20],se=true,ess=true)
     @test abs(ll.est-llexact) < 4*ll.se
 
-    ## This latent process has no memory, so the test cannot detect a
-    ## missing normalizing constant at `target > 0`; the next one can.
+    # This latent process has no memory, so the test cannot detect a
+    # missing normalizing constant at `target > 0`; the next one can.
 
 end
 
@@ -64,10 +64,10 @@ end
 
 @testset verbose=true "power resampling is unbiased" begin
 
-    ## Frozen binary state X ~ Bernoulli(1/2), with g₁ = (0.2,1.8) and
-    ## g₂ = (0,1) at X = (0,1): the exact likelihood is 0.9.  With Np = 2
-    ## and target = 1/2, omitting the normalizing constant of the
-    ## tempered resampling step gives E[Ẑ] = 0.8875.
+    # Frozen binary state X ~ Bernoulli(1/2), with g₁ = (0.2,1.8) and
+    # g₂ = (0,1) at X = (0,1): the exact likelihood is 0.9.  With Np = 2
+    # and target = 1/2, omitting the normalizing constant of the
+    # tempered resampling step gives E[Ẑ] = 0.8875.
 
     Random.seed!(263260083)
 
@@ -90,7 +90,7 @@ end
     zexact = 0.9
     nrep = 200_000
 
-    ## E[Ẑ] and its standard error, on the natural scale
+    # E[Ẑ] and its standard error, on the natural scale
     meanZ(;Np,trigger,target) = begin
         s = 0.0; ss = 0.0
         for _ ∈ 1:nrep
@@ -101,7 +101,7 @@ end
         (est=mu, se=sqrt(max(ss/nrep-mu^2,0.0)/nrep))
     end
 
-    ## control: ordinary resampling, target = 0, must be unbiased
+    # control: ordinary resampling, target = 0, must be unbiased
     r0 = meanZ(Np=2,trigger=1.0,target=0.0)
     @test abs(r0.est-zexact) < 4*r0.se
 
@@ -111,7 +111,7 @@ end
         @test abs(r.est-zexact) < 4*r.se
     end
 
-    ## reported, not tested: a bias would be O(1/Np)
+    # reported, not tested: a bias would be O(1/Np)
     for Np ∈ [8,32,128]
         r = meanZ(Np=Np,trigger=1.0,target=0.5)
         @info "Np=$Np: E[Ẑ]=$(round(r.est,digits=6)) ± $(round(r.se,digits=6)), exact=$zexact"

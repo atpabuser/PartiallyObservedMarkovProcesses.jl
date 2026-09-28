@@ -2,9 +2,8 @@ import DataFrames: DataFrame
 import Distributions: Chisq, quantile
 import LinearAlgebra: dot, qr, UpperTriangular, SingularException
 
-# Weighted quadratic in (x-x0)/h. The intercept is the prediction;
-# scaling by h keeps the fit insensitive to the units of x.
-## largest distance times `sqrt(span)`, as in R.
+# Local quadratic regression, as R's `loess(degree = 2, surface = "direct")`
+# with one predictor.
 struct Loess
     x::Vector{Float64}
     y::Vector{Float64}
@@ -27,12 +26,13 @@ end
     h = if span ≤ 1
         partialsort(d,floor(Int,span*n))
     else
+        # as R: the largest distance times sqrt(span)
         maximum(d)*sqrt(span)
     end
     @assert h > 0 "zero bandwidth at $x0: too few distinct `x` values"
     w = @. ifelse(d < h, (1-(d/h)^3)^3, 0.0)
-    ## weighted quadratic in (x-x0)/h: its intercept is the prediction,
-    ## and the scaling keeps it well conditioned whatever the units of x
+    # Weighted quadratic in (x-x0)/h. The intercept is the prediction;
+    # scaling by h keeps the fit insensitive to the units of x.
     u = (x .- x0)./h
     X = hcat(ones(n),u,u.^2)
     sw = sqrt.(w)
@@ -59,7 +59,7 @@ struct MCAP
     fit::DataFrame
     "grid maximizer of the smoothed profile"
     mle::Float64
-    "maximizer of the quadratic fit"
+    "maximizer of the quadratic fit (NaN if it is not concave)"
     quadratic_max::Float64
     "Monte Carlo adjusted confidence interval"
     ci::Tuple{Float64,Float64}
@@ -84,9 +84,11 @@ end
 
 Monte Carlo adjusted profile (Ionides et al. 2017), as R `pomp`'s
 `mcap`.  `loglik` and `parameter` are typically the `loglik` column
-and the profiled column returned by [`profile`](@ref).  Returns an
-[`MCAP`](@ref).  The smoother corresponds to R's `loess` with
-`surface = "direct"`, which differs slightly from R's default.
+and the profiled column returned by [`profile`](@ref); `span` must lie
+in (0,1].  Returns an [`MCAP`](@ref).  The smoother corresponds to R's
+`loess` with `surface = "direct"`, which differs slightly from R's
+default.  Unlike R's, if the quadratic fit is not concave, the
+standard errors, cutoff, and interval are `NaN`.
 """
 mcap(
     loglik::AbstractVector{<:Real},
@@ -103,6 +105,7 @@ mcap(
     @assert all(isfinite,par) "`parameter` must be finite"
     @assert 0 < level < 1 "`level` must lie in (0,1)"
     @assert Ngrid ≥ 2 "`Ngrid` must be at least 2"
+    @assert 0 < span ≤ 1 "`span` must lie in (0,1] for `mcap`"
     @assert trunc(Int,span*n) ≥ 1 "`span*length(parameter)` must be at least 1"
     smooth_fit = loess(par,ll;span)
     grid = collect(range(minimum(par),maximum(par),length=Ngrid))
@@ -114,8 +117,8 @@ mcap(
     maxdist = maximum(dist[included])
     w = zeros(Float64,n)
     w[included] .= (1 .- (dist[included]./maxdist).^3).^3
-    ## weighted least squares, ll ~ c - a*z^2 + b*z, in the standardized
-    ## parameter z = (parameter-m)/s; results are converted back below
+    # weighted least squares, ll ~ c - a*z^2 + b*z, in the standardized
+    # parameter z = (parameter-m)/s; results are converted back below
     m = (maximum(par)+minimum(par))/2
     s = (maximum(par)-minimum(par))/2
     z = (par .- m)./s
@@ -143,25 +146,26 @@ mcap(
     else
         NaN,NaN,NaN
     end
-    ## standard errors in z units; `delta` is the same in any units
-    se_mc_squared = (1/(4*a*a))*(var_b - (2*b/a)*cov_ab + (b*b/a/a)*var_a)
-    se_stat_squared = 1/2/a
-    se_total_squared = se_mc_squared + se_stat_squared
     concave = a > 0
     concave || @warn "`mcap`: the quadratic fit is not concave; standard errors and the interval are not defined."
-    delta = quantile(Chisq(1),level)*(a*se_mc_squared + 0.5)
+    # standard errors in z units; `delta` is the same in any units.
+    # All assume a concave fit, so otherwise they are NaN (R's are not)
+    se_mc_squared = concave ? (1/(4*a*a))*(var_b - (2*b/a)*cov_ab + (b*b/a/a)*var_a) : NaN
+    se_stat_squared = concave ? 1/2/a : NaN
+    se_total_squared = se_mc_squared + se_stat_squared
+    delta = concave ? quantile(Chisq(1),level)*(a*se_mc_squared + 0.5) : NaN
     logLik_diff = maximum(smoothed) .- smoothed
     inside = grid[logLik_diff .< delta]
-    ## the cutoff assumes a concave fit; otherwise there is no interval
+    # the cutoff assumes a concave fit; otherwise there is no interval
     ci = (concave && !isempty(inside)) ? (minimum(inside),maximum(inside)) : (NaN,NaN)
-    ## as R: the square root of a negative variance is NaN
+    # as R: the square root of a negative variance is NaN
     nsqrt(v) = v ≥ 0 ? sqrt(v) : NaN
     zg = (grid .- m)./s
     quadratic = c .+ b.*zg .- a.*zg.^2
     MCAP(
         ll,par,Float64(level),Float64(span),
         DataFrame(parameter=grid,smoothed=smoothed,quadratic=quadratic),
-        smooth_arg_max,m+s*b/(2*a),ci,delta,
+        smooth_arg_max,concave ? m+s*b/(2*a) : NaN,ci,delta,
         s*nsqrt(se_stat_squared),s*nsqrt(se_mc_squared),s*nsqrt(se_total_squared),
         (c=c-b*m/s-a*m^2/s^2, a=a/s^2, b=b/s+2*a*m/s^2),
     )

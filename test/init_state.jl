@@ -9,10 +9,10 @@ using Test
 
 @testset verbose=true "undeclared init_state" begin
 
-    ## The Gompertz model twice: as shipped (init_state declared) and
-    ## built without init_state, as PhyloPOMP's genealogy filters are.
-    ## `mif` used to fail on the second with a MethodError. Given the
-    ## same random numbers, the two must now give identical results.
+    # The Gompertz model twice: as shipped (init_state declared) and
+    # built without init_state, as PhyloPOMP's genealogy filters are.
+    # `mif` used to fail on the second with a MethodError. Given the
+    # same random numbers, the two must now give identical results.
     P = gompertz()
     Q = pomp(
         parus_data,t0=1960,times=:year,
@@ -40,12 +40,12 @@ using Test
         @test isequal(traces(B),traces(A))
         @test coef(B) == coef(A)
         @test logLik(B) == logLik(A)
-        ## continuation
+        # continuation
         Random.seed!(72); A2 = mif(A;Nmif=2)
         Random.seed!(72); B2 = mif(B;Nmif=2)
         @test isequal(traces(B2),traces(A2))
     end
-    ## and a profile runs on it
+    # and a profile runs on it
     pr = profile(Q,DataFrame(K=[200.0],r=[4.5],σₚ=[0.7],σₘ=[0.1],X0=[150.0]);
         Nmif=2,Np=50,perturbations=@perturbn(@lognormal(σₚ,0.1)),
         cooling=geometric_cooling(0.5))

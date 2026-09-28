@@ -50,44 +50,44 @@ using Test
         @test pr isa DataFrame
         @test nrow(pr) == 10
         @test propertynames(pr) == [:a,:k,:x0,:loglik,:se,:ess]
-        ## the profiled parameter is untouched, the others have moved
+        # the profiled parameter is untouched, the others have moved
         @test pr.a == d.a
         @test all(pr.k .!= d.k)
         @test all(pr.x0 .!= d.x0)
         @test all(pr.k .> 0) && all(pr.x0 .> 0)
         @test all(isfinite,pr.loglik)
         @test all(pr.ess .≤ 2)
-        ## reproducible under the same seed
+        # reproducible under the same seed
         Random.seed!(33)
         pr2 = profile(P,d;Nmif=3,Np=50,perturbations=ptb,cooling=cool,nreps=2,Np_eval=100)
         @test pr2 == pr
-        ## mcap runs on the profile output
+        # mcap runs on the profile output
         m = mcap(pr.loglik,pr.a;span=1.0)
         @test m isa MCAP
         @test minimum(pr.a) ≤ m.mle ≤ maximum(pr.a)
     end
 
     @testset "fixed parameters" begin
-        ## perturbing a profiled parameter is refused
+        # perturbing a profiled parameter is refused
         bad = @perturbn(@lognormal(a,0.1),@lognormal(k,0.1))
         @test_throws r"must not be perturbed" profile(P,d;Nmif=1,Np=10,perturbations=bad,cooling=cool)
         badivp = @perturbn(@lognormal(k,0.1),@ivp(@lognormal(a,0.1)))
         @test_throws r"must not be perturbed" profile(P,d;Nmif=1,Np=10,perturbations=badivp,cooling=cool)
-        ## a plain data frame without metadata is accepted as a design;
-        ## an unperturbed parameter keeps its exact value
+        # a plain data frame without metadata is accepted as a design;
+        # an unperturbed parameter keeps its exact value
         pk = @perturbn(@lognormal(k,0.05))
         pr3 = profile(P,DataFrame(a=[1.5],k=[7.0],x0=[5.0]);Nmif=1,Np=20,perturbations=pk,cooling=cool)
         @test nrow(pr3) == 1
         @test pr3.x0 == [5.0] && pr3.a == [1.5]
-        ## parameters absent from the design appear in the output
+        # parameters absent from the design appear in the output
         pr4 = profile(P,DataFrame(a=[1.5]);Nmif=1,Np=20,perturbations=pk,cooling=cool)
         @test propertynames(pr4) == [:a,:k,:x0,:loglik,:se,:ess]
         @test pr4.x0 == [5.0] && pr4.a == [1.5] && pr4.k[1] != 7.0
     end
 
     @testset "model components passed to mif are used in the evaluation" begin
-        ## with a flat measurement density of -1 at each of 21 times, the
-        ## log likelihood is exactly -21 whatever the parameters
+        # with a flat measurement density of -1 at each of 21 times, the
+        # log likelihood is exactly -21 whatever the parameters
         flat = function (;_...) -1.0 end
         pr = profile(P,DataFrame(a=[1.5]);Nmif=1,Np=20,
             perturbations=@perturbn(@lognormal(k,0.05)),cooling=cool,
@@ -95,22 +95,46 @@ using Test
         @test pr.loglik[1] ≈ -length(times(P))
     end
 
+    @testset "evaluation uses the resampling settings of the fit" begin
+        # the resampling settings are honored.  In the frozen-state model
+        # with 2 particles, a likelihood estimate of 0.5 or 1.0 can only
+        # arise if the filter resampled; with trigger = 0 it never does,
+        # so every estimate is 0, 0.9, or 1.8
+        Pz = pomp([(y=0.0,),(y=0.0,)]; t0=0.0, times=[1.0,2.0], params=(d=1.0,),
+            rinit=(;_...) -> (x = rand() < 0.5 ? 1.0 : 0.0,),
+            rprocess=discrete_time((;x,_...) -> (x=x,),dt=1.0),
+            logdmeasure=(;t,x,_...) -> t == 1 ? log(x == 1 ? 1.8 : 0.2) : log(x == 1 ? 1.0 : 0.0))
+        Random.seed!(46)
+        pr = profile(Pz,DataFrame(d=ones(40));Nmif=2,Np=10,Np_eval=2,
+            perturbations=@perturbn(@lognormal(d,0.1)),cooling=cool,
+            avfun=x->sum(x)/length(x),trigger=0.0,target=0.0)
+        @test round.(exp.(pr.loglik),digits=6) ⊆ [0.0,0.9,1.8]
+    end
+
+    @testset "reserved names" begin
+        pk = @perturbn(@lognormal(k,0.05))
+        @test_throws r"`slice` is reserved" profile(pomp(P;params=merge(p1,(slice=1.0,))),DataFrame(a=[1.5]);
+            Nmif=1,Np=10,perturbations=pk,cooling=cool)
+        @test_throws r"`se` is reserved" profile(pomp(P;params=merge(p1,(se=1.0,))),DataFrame(a=[1.5]);
+            Nmif=1,Np=10,perturbations=pk,cooling=cool)
+    end
+
     @testset "finding the perturbed parameters" begin
         N = length(times(P))
         @test Set(POMP.perturbed_names(ptb,[p1],N)) == Set([:k,:x0])
         @test Set(POMP.perturbed_names(@perturbn(@ivp(@lognormal(x0,0.1))),[p1],N)) == Set([:x0])
-        ## the random numbers are left alone
+        # the random numbers are left alone
         Random.seed!(44); u = rand()
         Random.seed!(44); POMP.perturbed_names(ptb,[p1],N); @test rand() == u
-        ## every lag `mif` uses is checked, not only the first two
+        # every lag `mif` uses is checked, not only the first two
         late = function (scale, lag; k, a, _...)
             k = rand(LogNormal(log(k),0.05*scale))
             lag == 7 ? (;k, a=rand(LogNormal(log(a),0.05*scale))) : (;k)
         end
         @test Set(POMP.perturbed_names(late,[p1],N)) == Set([:k,:a])
         @test_throws r"must not be perturbed" profile(P,d;Nmif=1,Np=10,perturbations=late,cooling=cool)
-        ## a parameter perturbed depending on its value, which the lags
-        ## cannot reveal, is caught after the fit
+        # a parameter perturbed depending on its value, which the lags
+        # cannot reveal, is caught when `mif` makes the call
         Random.seed!(45)
         sneaky = function (scale, lag; k, a, _...)
             move_a = k > 7.2    # decided by the incoming value of k
@@ -120,9 +144,9 @@ using Test
         @test POMP.perturbed_names(sneaky,[p1],N) == (:k,)
         @test_throws r"moved parameter `a`" profile(P,DataFrame(a=[1.5],k=[7.0],x0=[5.0]);
             Nmif=2,Np=20,perturbations=sneaky,cooling=geometric_cooling(1.0))
-        ## a function that moves `a` only below full scale, and moves it
-        ## back before each iteration ends: invisible both to probing and
-        ## to the trace
+        # a function that moves `a` only below full scale, and moves it
+        # back before each iteration ends: invisible both to probing and
+        # to the trace
         sly = function (scale, lag; k, _...)
             k = rand(LogNormal(log(k),0.05*scale))
             scale == 1.0 ? (;k) : lag == 5 ? (;k, a=2.0) : lag == 15 ? (;k, a=1.5) : (;k)

@@ -2,6 +2,9 @@ import DataFrames: DataFrame, AbstractDataFrame, metadata!, metadata, nrow
 import Sobol: SobolSeq, next!
 import Random: AbstractRNG, default_rng
 
+# column names that `slice` and `profile` use for their own output
+const RESERVED_NAMES = (:slice,:loglik,:se,:ess)
+
 """
     slice_design(center; slices...)
 
@@ -15,7 +18,9 @@ slice_design(center::NamedTuple; slices...) = begin
     @assert !isempty(slices) "at least one slice must be given"
     pnames = keys(center)
     @assert all(v -> v isa Real, values(center)) "`center` must be a `NamedTuple` of real numbers"
-    @assert :slice ∉ pnames "a parameter cannot be named `slice`"
+    for p ∈ pnames
+        @assert p ∉ RESERVED_NAMES "parameter name `$p` is reserved: `slice`, `loglik`, `se`, and `ess` cannot be parameter names"
+    end
     frames = map(collect(pairs(slices))) do (nm,vals)
         @assert nm ∈ pnames "variable `$nm` does not appear in `center`"
         v = vals isa Real ? [Float64(vals)] : collect(Float64,vals)
@@ -120,6 +125,9 @@ profile_design(;
     pnames = first.(pv)
     for k ∈ pnames
         @assert k ∉ keys(lower) "profiled variable `$k` must not appear in `lower`/`upper`"
+    end
+    for k ∈ (pnames...,keys(lower)...)
+        @assert k ∉ RESERVED_NAMES "parameter name `$k` is reserved: `slice`, `loglik`, `se`, and `ess` cannot be parameter names"
     end
     grids = [v isa Real ? [Float64(v)] : collect(Float64,v) for (_,v) ∈ pv]
     rows = vec(collect(Iterators.product(map(eachindex,grids)...)))

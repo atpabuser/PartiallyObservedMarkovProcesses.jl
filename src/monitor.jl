@@ -40,12 +40,14 @@ resampled(object::MifdPompObject) = resampled(object.pfobj)
 Estimates the log likelihood by [`pfilter_loglik`](@ref) at the point
 estimates recorded in the traces of one or more successive [`mif`](@ref)
 computations, at every `every`-th iteration and the last.  Unlike the
-`mif` log likelihood, which is that of the perturbed model, these are
-fixed-parameter estimates, each under the model of the computation
-that recorded it.  They use their own random numbers, from
-`seed`, and leave those of the session unchanged.  Returns a
-`DataFrame` of iterations, numbered as in [`traces`](@ref), log
-likelihoods, and parameters.
+per-iteration log likelihoods in `traces(mf).logLik`, which are those of
+the perturbed model, these are estimated by unperturbed particle
+filters, each with the model and resampling settings of the
+computation that recorded it.
+They use their own random numbers, from `seed`, and leave those of the
+session unchanged.  Returns a `DataFrame` of iterations, numbered as in
+[`traces`](@ref), log likelihoods, and parameters; so parameters cannot
+be named `iteration`, `loglik`, `se`, or `ess`.
 """
 monitor(
     runs::AbstractVector{<:MifdPompObject};
@@ -57,8 +59,11 @@ monitor(
     @assert !isempty(runs) "no `mif` results given"
     @assert every ≥ 1 "`every` must be positive"
     pnames = keys(coef(runs[1]))
-    ## a continuation's first trace row is the perturbed start of that
-    ## run, not a completed iteration, so it is dropped
+    for p ∈ pnames
+        @assert p ∉ (:iteration,:loglik,:se,:ess) "parameter name `$p` is reserved: `iteration`, `loglik`, `se`, and `ess` cannot be parameter names"
+    end
+    # a continuation's first trace row is the perturbed start of that
+    # run, not a completed iteration, so it is dropped
     points = NamedTuple[]
     models = AbstractPompObject[]
     iters = Int[]
@@ -66,7 +71,7 @@ monitor(
         tr = traces(m)
         for j ∈ (k == 1 ? 1 : 2):nrow(tr)
             push!(points,NamedTuple{pnames}(Tuple(tr[j,p] for p ∈ pnames)))
-            push!(models,pomp(m))
+            push!(models,m)
             push!(iters,isempty(iters) ? 1 : iters[end]+1)
         end
     end

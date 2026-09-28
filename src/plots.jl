@@ -1,6 +1,6 @@
-## Plotting functions, implemented in the AlgebraOfGraphics extension
-## (ext/PartiallyObservedMarkovProcessesAoGExt.jl): load
-## `AlgebraOfGraphics` and a Makie backend (e.g., `CairoMakie`) to use them.
+# Plotting functions, implemented in the AlgebraOfGraphics extension
+# (ext/PartiallyObservedMarkovProcessesAoGExt.jl): load
+# `AlgebraOfGraphics` and a Makie backend (e.g., `CairoMakie`) to use them.
 
 """
     sliceplot(df; kwargs...)
@@ -25,11 +25,25 @@ function mcapplot end
 """
     traceplot(mf; pars, monitor, kwargs...)
 
-Plots the traces of one or a vector of [`mif`](@ref) computations: the
-log likelihood and the parameters `pars` (by default, those perturbed)
-against the iteration, with the output of [`monitor`](@ref) as a
-further panel if given.  Returns the figure drawn by AlgebraOfGraphics;
-additional arguments are passed to `draw`.  Requires
+Plots the traces of one or a vector of [`mif`](@ref) computations, each
+as a separate run: the log likelihood and the parameters `pars` (by
+default, all those perturbed) against the iteration.  `monitor` adds a
+panel from the output of [`monitor`](@ref), one data frame per run, each
+computed for that run alone.  Returns the figure drawn by
+AlgebraOfGraphics; additional arguments are passed to `draw`.  Requires
 `AlgebraOfGraphics` and a Makie backend.
 """
 function traceplot end
+
+"""
+    filterplot(x; kwargs...)
+
+Plots the effective sample size and the conditional log likelihood
+against time for the result of [`pfilter`](@ref) or [`mif`](@ref), or a
+vector of them, one line per run.  For a `mif` result, these come from
+the particle filter run at its final estimate.  Times at which the
+conditional log likelihood is -∞ appear as gaps.  Returns the figure
+drawn by AlgebraOfGraphics; additional arguments are passed to `draw`.
+Requires `AlgebraOfGraphics` and a Makie backend.
+"""
+function filterplot end

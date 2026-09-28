@@ -6,9 +6,9 @@ h1 = crayon"bold blue"
 h2 = s -> crayon"!bold light_yellow"("- "*s)
 
 @testset verbose=true "POMP.jl" begin
-    ## Plots must load before R draws any graphics (the R-comparison
-    ## tests below): R's graphics devices load the system Glib, after
-    ## which Plots' own Glib fails with an undefined symbol.
+    # The plotting tests must run before R draws any graphics (the
+    # R-comparison tests below): R's graphics devices load the system
+    # Glib, after which CairoMakie's own Glib fails to load.
     include("plots.jl")
     include("basic.jl")
     include("errors.jl")

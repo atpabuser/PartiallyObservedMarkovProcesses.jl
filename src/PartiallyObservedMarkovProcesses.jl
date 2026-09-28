@@ -85,7 +85,7 @@ include("mcap.jl")
 export hyperbolic_cooling, resampled, monitor
 include("monitor.jl")
 
-export sliceplot, mcapplot, traceplot
+export sliceplot, mcapplot, traceplot, filterplot
 include("plots.jl")
 
 export paramsymbs

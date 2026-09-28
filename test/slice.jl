@@ -44,34 +44,37 @@ using Test
         @test isfinite(r.loglik)
         @test r.se ≥ 0
         @test 1 ≤ r.ess ≤ 5
-        ## agrees with logmeanexp of replicate pfilter runs under the same seed
+        # agrees with logmeanexp of replicate pfilter runs under the same seed
         Random.seed!(11)
         lls = [logLik(pfilter(P;Np=100,params=p1)) for _ ∈ 1:5]
         est = logmeanexp(lls;se=true,ess=true)
         @test r.loglik == est.est
         @test r.se == est.se
         @test r.ess == est.ess
-        ## a single replicate has no standard error
+        # a single replicate has no standard error
         r1 = pfilter_loglik(P;Np=100,nreps=1)
         @test isfinite(r1.loglik) && isnan(r1.se) && r1.ess == 1
-        ## all-infinite replicates
+        # all-infinite replicates
         @test POMP.summarize_loglik([-Inf,-Inf]) == (loglik=-Inf,se=NaN,ess=0.0) ||
             (POMP.summarize_loglik([-Inf,-Inf]).loglik == -Inf &&
              isnan(POMP.summarize_loglik([-Inf,-Inf]).se) &&
              POMP.summarize_loglik([-Inf,-Inf]).ess == 0)
-        ## a replicate at -Inf is an estimate of zero and is kept
+        # a replicate at -Inf is an estimate of zero and is kept
         s = POMP.summarize_loglik([-Inf,-10.0,-12.0])
         @test s.loglik == logmeanexp([-Inf,-10.0,-12.0])
         @test s.loglik < logmeanexp([-10.0,-12.0])
         @test s.ess == logmeanexp([-Inf,-10.0,-12.0];ess=true).ess
         @test_throws r"nreps" pfilter_loglik(P;Np=10,nreps=0)
+        # NaN or +Inf is an invalid estimate, not a zero likelihood
+        @test_throws r"invalid NaN" POMP.summarize_loglik([NaN,NaN])
+        @test_throws r"invalid NaN" POMP.summarize_loglik([Inf,-10.0])
     end
 
     @testset "pfilter_loglik is unbiased when some replicates are -Inf" begin
-        ## Frozen binary state X ~ Bernoulli(1/2), with g₁ = (0.2,1.8) and
-        ## g₂ = (0,1) at X = (0,1): exact likelihood 0.9, and with Np = 2
-        ## about a quarter of the replicates are exactly zero.  Dropping
-        ## them gave a mean of 1.20.
+        # Frozen binary state X ~ Bernoulli(1/2), with g₁ = (0.2,1.8) and
+        # g₂ = (0,1) at X = (0,1): exact likelihood 0.9, and with Np = 2
+        # about a quarter of the replicates are exactly zero.  Dropping
+        # them gave a mean of 1.20.
         Random.seed!(5)
         Pz = pomp(
             [(y=0.0,),(y=0.0,)];
@@ -82,6 +85,12 @@ using Test
         )
         z = [exp(pfilter_loglik(Pz;Np=2,nreps=10).loglik) for _ ∈ 1:5000]
         @test abs(sum(z)/length(z)-0.9) < 5*std(z)/sqrt(length(z))
+        # the resampling settings are honored.  In the frozen-state model
+        # with 2 particles, a likelihood estimate of 0.5 or 1.0 can only
+        # arise if the filter resampled; with trigger = 0 it never does,
+        # so every estimate is 0, 0.9, or 1.8
+        s = slice(Pz,DataFrame(dummy=zeros(40));Np=2,trigger=0.0,target=0.0)
+        @test round.(exp.(s.loglik),digits=6) ⊆ [0.0,0.9,1.8]
     end
 
     @testset "slice" begin
@@ -94,19 +103,24 @@ using Test
         @test s[:,1:4] == d
         @test all(isfinite,s.loglik)
         @test all(s.ess .≤ 3)
-        ## the truth should beat the far-off values along the `a` slice
+        # the truth should beat the far-off values along the `a` slice
         ia = findall(==(:a),s.slice)
         @test s.loglik[ia[2]] > s.loglik[ia[1]]
         @test s.loglik[ia[2]] > s.loglik[ia[3]]
-        ## reproducible under the same seed
+        # reproducible under the same seed
         Random.seed!(22)
         s2 = slice(P,d;Np=100,nreps=3)
         @test s2 == s
-        ## design columns must be parameters
+        # design columns must be parameters
         bad = copy(d); bad.zz = ones(nrow(d))
         @test_throws r"not parameters of the model" slice(P,bad;Np=10)
         @test_throws r"no rows" slice(P,d[1:0,:];Np=10)
-        ## a design need not carry every parameter
+        # a model parameter named `slice` would be dropped as the design's
+        # marker column, and one named `se` overwritten by the output
+        @test_throws r"`slice` is reserved" slice(pomp(P;params=merge(p1,(slice=1.0,))),DataFrame(a=[1.5]);Np=10)
+        @test_throws r"`se` is reserved" slice(pomp(P;params=merge(p1,(se=1.0,))),DataFrame(a=[1.5]);Np=10)
+        @test_throws r"design column `ess` is reserved" slice(P,DataFrame(a=[1.5],ess=[1.0]);Np=10)
+        # a design need not carry every parameter
         s3 = slice(P,DataFrame(a=[1.4,1.6]);Np=50)
         @test propertynames(s3) == [:a,:loglik,:se,:ess]
     end
